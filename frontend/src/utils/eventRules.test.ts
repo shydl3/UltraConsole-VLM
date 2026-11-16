@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bindingError, newRule, parseRuleImport, ruleChanged, rulePayload } from './eventRules'
+import { bindingError, newRule, parseRuleImport, PRESET_RULE_ID, presetRule, ruleChanged, rulePayload } from './eventRules'
 
 describe('event rule imports and per-run bindings', () => {
   it('assigns stable independent IDs to text entries and preserves exported definitions', () => {
@@ -27,5 +27,25 @@ describe('event rule imports and per-run bindings', () => {
     expect(bindingError(row, [], pois)).toBe('')
     expect(bindingError(row, ['removed'], pois)).not.toBe('')
     expect(bindingError({ ...row, triggerKinds: ['zone.enter'] }, [], pois)).not.toBe('')
+  })
+  it('supports integrity-only rules bound to integrity zones', () => {
+    const row = { ...newRule('围墙完整性'), triggerKinds: ['integrity.change' as const] }
+    const zones = [{ id: 'wall', kind: 'integrity', label: 'W1' }]
+    expect(bindingError(row, [], [], zones)).toBe('')
+    expect(bindingError(row, [], [], [])).not.toBe('')
+    // An integrity trigger never matches a line POI by itself.
+    expect(bindingError(row, [], [{ id: 'gate', kind: 'line', label: '门' }], [])).not.toBe('')
+    expect(rulePayload(row).integrityIds).toEqual([])
+    const imported = parseRuleImport(JSON.stringify({ rules: [{ ...rulePayload(row), integrityIds: ['wall'] }] }))
+    expect(imported[0].integrityIds).toEqual(['wall'])
+    expect(imported[0].triggerKinds).toEqual(['integrity.change'])
+  })
+  it('keeps the synthesized preset row clean until the backend seeds it', () => {
+    const preset = presetRule()
+    expect(preset.id).toBe(PRESET_RULE_ID)
+    expect(ruleChanged(preset, undefined)).toBe(false)
+    expect(ruleChanged(preset, { ...preset, version: 1 })).toBe(false)
+    expect(ruleChanged({ ...preset, description: '改' }, { ...preset, version: 1 })).toBe(true)
+    expect(rulePayload(preset).triggerKinds).toEqual(['integrity.change'])
   })
 })

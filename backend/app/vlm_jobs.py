@@ -17,6 +17,7 @@ from ultra_rules.vlm.contracts import AnalysisParameters as AnalysisParameters  
 from ultra_rules.vlm.contracts import CueDefinition as CueDefinition  # noqa: E402
 from ultra_rules.vlm.contracts import EventDefinition as EventDefinition  # noqa: E402
 from ultra_rules.vlm.contracts import Identifier as Identifier  # noqa: E402
+from ultra_rules.vlm.contracts import IntegrityZone as IntegrityZone  # noqa: E402
 from ultra_rules.vlm.contracts import Poi as Poi  # noqa: E402
 from ultra_rules.vlm.contracts import RunRequest as RunRequest  # noqa: E402
 from ultra_rules.vlm.contracts import StrictModel as StrictModel  # noqa: E402

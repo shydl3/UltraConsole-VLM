@@ -141,11 +141,6 @@ export function ControlPanel() {
         <div className={styles.field}>
           <div className={styles.labelRow}>
             <span className={styles.label}>{t('vlmParameters.modelPath')}</span>
-            {vlmContract && vlmModelPath !== vlmContract.defaults.modelPath && (
-              <button type="button" className={styles.hint} onClick={() => onSelectVlmModel(vlmContract.defaults.modelPath)}>
-                {t('vlmParameters.useDefaultModel')}
-              </button>
-            )}
           </div>
           <select
             className={styles.select}

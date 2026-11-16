@@ -9,7 +9,7 @@ from .models import default_model_path
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")]
 Coordinate = Annotated[float, Field(ge=0, le=1)]
 Point = tuple[Coordinate, Coordinate]
-Trigger = Literal["line.cross", "zone.enter", "zone.leave", "initial_inside"]
+Trigger = Literal["line.cross", "zone.enter", "zone.leave", "initial_inside", "integrity.change"]
 
 
 class StrictModel(BaseModel):
@@ -78,12 +78,61 @@ class CueDefinition(StrictModel):
         return self
 
 
+class IntegrityZone(StrictModel):
+    """A static-scene region monitored for persistent visual change (tamper detection).
+
+    The region is expected to stay unchanged for the whole video; a baseline is
+    built from the first samples and every later sample is compared against it.
+    A change must persist for confirmSec before it becomes an integrity.change
+    warning, so transient occlusions and lighting drift do not alarm.
+    """
+
+    id: Identifier
+    label: str = Field(default="", max_length=200)
+    points: list[Point] = Field(min_length=3, max_length=100)
+    # Independent low-rate sampling: integrity changes are minute-scale events.
+    sampleFps: float = Field(default=0.5, ge=0.1, le=2)
+    # Per-pixel median of the first N samples forms the baseline crop.
+    baselineFrames: int = Field(default=5, ge=1, le=30)
+    # Gray-level difference (0-255 scale) above which a pixel counts as changed.
+    pixelThreshold: int = Field(default=25, ge=5, le=100)
+    # Changed-pixel fraction inside the polygon that marks a sample as changed.
+    changeRatio: float = Field(default=0.04, gt=0, le=1)
+    # A change must persist this long before it is confirmed as an event.
+    confirmSec: float = Field(default=10, ge=0, le=300)
+    # Weight of the edge-structure channel vs the raw intensity channel (0..1).
+    edgeWeight: float = Field(default=0.5, ge=0, le=1)
+    # Largest connected changed blob must cover this fraction of the ROI.
+    minBlobRatio: float = Field(default=0.005, ge=0, le=1)
+    # Global camera shift up to this fraction of frame width is auto-aligned;
+    # larger shifts mark the sample unreliable (camera moved / scene cut).
+    alignTolerance: float = Field(default=0.02, ge=0, le=0.2)
+    # Exclude pixels covered by tracked persons from the change mask.
+    ignoreDetections: bool = True
+    # Ask Qwen3-VL to review before/after crops once a change is confirmed.
+    vlmReview: bool = False
+
+    @model_validator(mode="after")
+    def geometry(self):
+        if self.points[0] == self.points[-1]:
+            self.points = self.points[:-1]
+        if len(self.points) < 3:
+            raise ValueError("An integrity ROI needs at least three vertices")
+        if any(a == b for a, b in zip(self.points, self.points[1:] + self.points[:1], strict=True)):
+            raise ValueError("An integrity ROI cannot contain zero-length edges")
+        area = sum(a[0] * b[1] - b[0] * a[1] for a, b in zip(self.points, self.points[1:] + self.points[:1], strict=True))
+        if abs(area) < 1e-8:
+            raise ValueError("Integrity ROI area must be positive")
+        return self
+
+
 class EventDefinition(StrictModel):
     id: Identifier
     description: str = Field(min_length=1, max_length=1500)
     enabled: bool = True
     poiIds: list[Identifier] = Field(default_factory=list, max_length=50)
     cueIds: list[Identifier] = Field(default_factory=list, max_length=20)
+    integrityIds: list[Identifier] = Field(default_factory=list, max_length=20)
     triggerKinds: list[Trigger] = Field(default_factory=lambda: ["line.cross", "zone.enter", "zone.leave"], min_length=1)
     preSeconds: float = Field(default=4, ge=0, le=60)
     postSeconds: float = Field(default=6, ge=0, le=60)
@@ -115,17 +164,24 @@ class AnalysisParameters(StrictModel):
 
 class RunRequest(AnalysisParameters):
     videoId: Identifier
-    pois: list[Poi] = Field(min_length=1, max_length=50)
+    # Integrity-only runs are valid: no tracking POI is required when at least
+    # one integrity zone is monitored.
+    pois: list[Poi] = Field(default_factory=list, max_length=50)
     cues: list[CueDefinition] = Field(default_factory=list, max_length=20)
+    integrityZones: list[IntegrityZone] = Field(default_factory=list, max_length=20)
     events: list[EventDefinition] = Field(min_length=1, max_length=30)
 
     @model_validator(mode="after")
     def references(self):
+        if not self.pois and not self.integrityZones:
+            raise ValueError("At least one POI or integrity zone is required")
         ids = [p.id for p in self.pois]
         cue_ids = [c.id for c in self.cues]
+        integrity_ids = [z.id for z in self.integrityZones]
         event_ids = [e.id for e in self.events]
-        if len(set(ids)) != len(ids) or len(set(event_ids)) != len(event_ids) or len(set(cue_ids)) != len(cue_ids):
-            raise ValueError("POI, cue and event IDs must be unique")
+        if len(set(ids)) != len(ids) or len(set(event_ids)) != len(event_ids) or len(set(cue_ids)) != len(cue_ids) \
+                or len(set(integrity_ids)) != len(integrity_ids):
+            raise ValueError("POI, cue, integrity and event IDs must be unique")
         if not any(e.enabled for e in self.events):
             raise ValueError("At least one event must be enabled")
         for event in self.events:
@@ -133,6 +189,8 @@ class RunRequest(AnalysisParameters):
                 raise ValueError(f"Unknown POI referenced by {event.id}")
             if set(event.cueIds) - set(cue_ids):
                 raise ValueError(f"Unknown cue referenced by {event.id}")
+            if set(event.integrityIds) - set(integrity_ids):
+                raise ValueError(f"Unknown integrity zone referenced by {event.id}")
         return self
 
 

@@ -2,10 +2,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { apiVlm, apiVlmUploadChunked } from '../../api/client'
 import type { EventsConfig } from '../../api/contracts'
 import { useT } from '../../i18n'
-import { vlmCues, vlmPois, type VlmRun, type VlmTask } from '../../utils/vlm'
+import { vlmCues, vlmIntegrity, vlmPois, type VlmRun, type VlmTask } from '../../utils/vlm'
 import styles from './VlmPanel.module.css'
 import { EventRulesEditor, type RulesEditorHandle, type RulesEditorState } from './EventRulesEditor'
 import { CueSettings } from './CueSettings'
+import { IntegritySettings } from './IntegritySettings'
 import { RuleSnapshotView } from './RuleSnapshotView'
 import type { RuleSnapshot } from '../../utils/eventRules'
 import { AnalysisParameters, ParameterSnapshot } from './AnalysisParameters'
@@ -133,7 +134,7 @@ export function VlmPanel({ file, eventsConfig, basicRunning, onBusyChange }: {
           }
           const created = await apiVlm<{ runId: string }>('/runs/from-rules', {
             method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ videoId, pois: vlmPois(eventsConfig), cues: vlmCues(eventsConfig), ...selection, ...parameters }),
+            body: JSON.stringify({ videoId, pois: vlmPois(eventsConfig), cues: vlmCues(eventsConfig), integrityZones: vlmIntegrity(eventsConfig), ...selection, ...parameters }),
           })
           setSubmissions(previous => previous.map(task => task.key === key
             ? { ...task, runId: created.runId, upload: undefined } : task))
@@ -156,14 +157,16 @@ export function VlmPanel({ file, eventsConfig, basicRunning, onBusyChange }: {
 
   const pois = vlmPois(eventsConfig)
   const cues = vlmCues(eventsConfig).map(c => ({ id: c.id, label: c.label, kind: 'cue' }))
+  const integrity = vlmIntegrity(eventsConfig).map(z => ({ id: z.id, label: z.label, kind: 'integrity' }))
   const uploadLabel = activeUpload && submitting
     ? t('vlm.batchUploading', { current: activeUpload.current, total: activeUpload.total, percent: activeUpload.percent })
     : t('vlm.uploading')
   return <section className={styles.panel} aria-label={t('vlm.title')}>
     <strong>{t('vlm.title')}</strong>
     <div className={styles.hint}>{t('vlm.hint')}</div>
-    <EventRulesEditor ref={rulesRef} pois={pois} cues={cues} onStateChange={setRulesState} />
+    <EventRulesEditor ref={rulesRef} pois={pois} cues={cues} integrity={integrity} onStateChange={setRulesState} />
     <CueSettings />
+    <IntegritySettings />
     <AnalysisParameters disabled={isBusy} onChange={setParameters} />
     <div className={styles.files}>
       <div className={styles.toolbar}>
@@ -186,11 +189,11 @@ export function VlmPanel({ file, eventsConfig, basicRunning, onBusyChange }: {
       </ul>
     </div>
     <div className={styles.toolbar}>
-      <button disabled={!files.length || !parameters || !pois.length || basicRunning || submitting || rulesState.busy || !rulesState.ready} onClick={() => void start()}>
+      <button disabled={!files.length || !parameters || (!pois.length && !integrity.length) || basicRunning || submitting || rulesState.busy || !rulesState.ready} onClick={() => void start()}>
         {submitting ? uploadLabel : files.length > 1 ? t('vlm.batchStart', { count: files.length })
           : rulesState.dirty ? t('eventRules.saveAndStart') : t('vlm.start')}
       </button>
-      <span className={styles.hint}>{pois.length} POI · {files.length ? files[0].name : t('vlm.chooseVideo')}</span>
+      <span className={styles.hint}>{pois.length} POI{integrity.length ? ` · ${t('vlm.integrityCount', { count: integrity.length })}` : ''} · {files.length ? files[0].name : t('vlm.chooseVideo')}</span>
     </div>
     <TaskQueue submissions={submissions} version={queueVersion} selectedRunId={runId}
       onBusyChange={handleBusy} onRunUpdate={handleRunUpdate} />

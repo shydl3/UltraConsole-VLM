@@ -1,8 +1,10 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from 'react'
 import { apiVlm } from '../../api/client'
 import { useT } from '../../i18n'
-import { bindingError, newRule, newRuleId, parseRuleImport, ruleChanged, ruleError, rulePayload, triggerKinds, type EventRule, type RuleLibrary, type RulePoi, type RuleSelection } from '../../utils/eventRules'
+import { bindingError, newRule, newRuleId, parseRuleImport, PRESET_RULE_ID, presetRule, ruleChanged, ruleError, rulePayload, triggerKinds, type EventRule, type RuleLibrary, type RulePoi, type RuleSelection } from '../../utils/eventRules'
 import styles from './EventRulesEditor.module.css'
+
+const withPreset = (rows: EventRule[]) => rows.some(r => r.id === PRESET_RULE_ID) ? rows : [...rows, presetRule()]
 
 export type RulesEditorState = { dirty: boolean; enabled: number; ready: boolean; busy: boolean }
 export type RulesEditorHandle = { prepare: () => Promise<{ revision: number; selections: RuleSelection[] }> }
@@ -12,12 +14,13 @@ function Dialog({ title, children, close }: { title: string; children: ReactNode
   return <dialog ref={ref} onCancel={e => { e.preventDefault(); close() }} className={styles.dialog} aria-label={title}><h3>{title}</h3>{children}</dialog>
 }
 
-export const EventRulesEditor = forwardRef<RulesEditorHandle, { pois: RulePoi[]; cues: RulePoi[]; onStateChange: (state: RulesEditorState) => void }>(function EventRulesEditor({ pois, cues, onStateChange }, ref) {
+export const EventRulesEditor = forwardRef<RulesEditorHandle, { pois: RulePoi[]; cues: RulePoi[]; integrity: RulePoi[]; onStateChange: (state: RulesEditorState) => void }>(function EventRulesEditor({ pois, cues, integrity, onStateChange }, ref) {
   const t = useT()
   const [library, setLibrary] = useState<RuleLibrary | null>(null)
   const [rows, setRows] = useState<EventRule[]>([])
   const [bindings, setBindings] = useState<Record<string, string[]>>({})
   const [cueBindings, setCueBindings] = useState<Record<string, string[]>>({})
+  const [integrityBindings, setIntegrityBindings] = useState<Record<string, string[]>>({})
   const [selected, setSelected] = useState<string[]>([])
   const [query, setQuery] = useState('')
   const [edit, setEdit] = useState<EventRule | null>(null)
@@ -33,12 +36,12 @@ export const EventRulesEditor = forwardRef<RulesEditorHandle, { pois: RulePoi[];
   const saved = new Map(library?.rules.map(row => [row.id, row]))
   const dirty = rows.filter(row => ruleChanged(row, saved.get(row.id)))
   const enabled = rows.filter(row => row.enabled)
-  const ready = !!library && enabled.length > 0 && enabled.length <= 30 && enabled.every(row => !ruleError(row) && !bindingError(row, bindings[row.id] || [], pois) && (cueBindings[row.id] || []).every(id => cues.some(c => c.id === id)))
+  const ready = !!library && enabled.length > 0 && enabled.length <= 30 && enabled.every(row => !ruleError(row) && (row.id === PRESET_RULE_ID || (!bindingError(row, bindings[row.id] || [], pois, integrity) && (cueBindings[row.id] || []).every(id => cues.some(c => c.id === id)) && (integrityBindings[row.id] || []).every(id => integrity.some(z => z.id === id)))))
 
   useEffect(() => {
     const controller = new AbortController()
     void apiVlm<RuleLibrary>('/event-rules', { signal: controller.signal }).then(value => {
-      if (!controller.signal.aborted) { setLibrary(value); setRows(value.rules); setSelected([]); setError('') }
+      if (!controller.signal.aborted) { setLibrary(value); setRows(withPreset(value.rules)); setSelected([]); setError('') }
     }).catch(e => { if (!controller.signal.aborted) setError(String(e)) })
     return () => controller.abort()
   }, [reload])
@@ -59,7 +62,7 @@ export const EventRulesEditor = forwardRef<RulesEditorHandle, { pois: RulePoi[];
     const remaining = rows.filter(r => !committed.has(r.id) && ruleChanged(r, saved.get(r.id)))
     const nextRows = response.rules.map(r => remaining.find(p => p.id === r.id) || r)
     nextRows.push(...remaining.filter(r => !response.rules.some(p => p.id === r.id)))
-    setLibrary(response); setRows(nextRows); setNotice(t('eventRules.saved')); setError('')
+    setLibrary(response); setRows(withPreset(nextRows)); setNotice(t('eventRules.saved')); setError('')
     return { library: response, rows: nextRows }
   }
   async function save(ids?: string[]) {
@@ -72,7 +75,7 @@ export const EventRulesEditor = forwardRef<RulesEditorHandle, { pois: RulePoi[];
     setBusy(true); setError('')
     try {
       const current = dirty.length ? await commit(dirty) : { library: library!, rows }
-      return { revision: current.library.revision, selections: current.rows.filter(r => r.enabled).map(r => ({ id: r.id, version: r.version, poiIds: bindings[r.id] || [], cueIds: cueBindings[r.id] || [] })) }
+      return { revision: current.library.revision, selections: current.rows.filter(r => r.enabled).map(r => ({ id: r.id, version: r.version, poiIds: bindings[r.id] || [], cueIds: cueBindings[r.id] || [], integrityIds: integrityBindings[r.id] || [] })) }
     } finally { setBusy(false) }
   }
   useImperativeHandle(ref, () => ({ prepare }))
@@ -102,6 +105,7 @@ export const EventRulesEditor = forwardRef<RulesEditorHandle, { pois: RulePoi[];
     })
     setBindings(previous => ({ ...previous, ...Object.fromEntries(mapped.map(row => [row.id, row.poiIds])) }))
     setCueBindings(previous => ({ ...previous, ...Object.fromEntries(mapped.map(row => [row.id, row.cueIds || []])) }))
+    setIntegrityBindings(previous => ({ ...previous, ...Object.fromEntries(mapped.map(row => [row.id, row.integrityIds || []])) }))
     setSelected(mapped.map(row => row.id)); setPending([]); setBulk(null); setNotice(t('eventRules.imported'))
   }
   const filtered = rows.filter(row => `${row.name} ${row.description} ${row.id}`.toLowerCase().includes(query.toLowerCase()))
@@ -131,29 +135,34 @@ export const EventRulesEditor = forwardRef<RulesEditorHandle, { pois: RulePoi[];
     {!library && !error && <p>{t('eventRules.loading')}</p>}
     <div className={styles.tableWrap}><table><thead><tr>
       <th><input type="checkbox" aria-label={t('eventRules.selectAll')} disabled={busy || !filtered.length} checked={!!filtered.length && filtered.every(r => selected.includes(r.id))} onChange={e => setSelected(e.target.checked ? filtered.map(r => r.id) : [])} /></th>
-      <th>{t('eventRules.enabled')}</th><th>{t('eventRules.definition')}</th><th>{t('eventRules.poi')}</th><th>{t('eventRules.cue')}</th><th>{t('eventRules.state')}</th><th>{t('eventRules.actions')}</th>
+      <th>{t('eventRules.enabled')}</th><th>{t('eventRules.definition')}</th><th>{t('eventRules.poi')}</th><th>{t('eventRules.cue')}</th><th>{t('eventRules.integrity')}</th><th>{t('eventRules.state')}</th><th>{t('eventRules.actions')}</th>
     </tr></thead><tbody>{filtered.map(row => {
       const changed = ruleChanged(row, saved.get(row.id))
-      const problem = ruleError(row) || (row.enabled && (pois.length || bindings[row.id]?.length) ? bindingError(row, bindings[row.id] || [], pois) : '')
+      const isPreset = row.id === PRESET_RULE_ID
+      const problem = ruleError(row) || (!isPreset && row.enabled && (pois.length || integrity.length || bindings[row.id]?.length) ? bindingError(row, bindings[row.id] || [], pois, integrity) : '')
       return <tr key={row.id} data-rule-id={row.id}>
         <td><input type="checkbox" aria-label={`${t('eventRules.select')} ${row.name}`} disabled={busy} checked={selected.includes(row.id)} onChange={e => setSelected(previous => e.target.checked ? [...previous, row.id] : previous.filter(id => id !== row.id))} /></td>
-        <td><input type="checkbox" role="switch" aria-label={`${t('eventRules.enabled')} ${row.name}`} disabled={busy} checked={row.enabled} onChange={e => stage({ ...row, enabled: e.target.checked })} /></td>
-        <td className={styles.definition}><strong>{row.name || t('eventRules.untitled')}</strong><p>{row.description}</p><span className={styles.hint}>{row.triggerKinds.map(k => t(`eventRules.${k}`)).join(' / ')} · −{row.preSeconds}s / +{row.postSeconds}s</span>{problem && <p className={styles.error}>{problem}</p>}</td>
-        <td><details><summary>{bindings[row.id]?.length ? t('eventRules.poiCount', { count: bindings[row.id].length }) : t('eventRules.allPoi')}</summary>
+        <td><input type="checkbox" role="switch" aria-label={`${t('eventRules.enabled')} ${row.name}`} disabled={busy || isPreset} checked={row.enabled} onChange={e => stage({ ...row, enabled: e.target.checked })} /></td>
+        <td className={styles.definition}><strong>{row.name || t('eventRules.untitled')}{isPreset && <span className={styles.hint}> · {t('eventRules.preset')}</span>}</strong><p>{row.description}</p><span className={styles.hint}>{row.triggerKinds.map(k => t(`eventRules.${k}`)).join(' / ')} · −{row.preSeconds}s / +{row.postSeconds}s</span>{problem && <p className={styles.error}>{problem}</p>}</td>
+        <td>{isPreset ? <span className={styles.hint}>—</span> : <details><summary>{bindings[row.id]?.length ? t('eventRules.poiCount', { count: bindings[row.id].length }) : t('eventRules.allPoi')}</summary>
           <button disabled={busy} onClick={() => setBindings(previous => ({ ...previous, [row.id]: [] }))}>{t('eventRules.allPoi')}</button>
           {Array.from(new Set([...pois.map(p => p.id), ...(bindings[row.id] || [])])).map(id => <label className={styles.poi} key={id}><input type="checkbox" disabled={busy} checked={(bindings[row.id] || []).includes(id)} onChange={e => setBindings(previous => ({ ...previous, [row.id]: e.target.checked ? [...(previous[row.id] || []), id] : (previous[row.id] || []).filter(p => p !== id) }))} />{pois.find(p => p.id === id)?.label || id}{!pois.some(p => p.id === id) ? ` (${t('eventRules.missing')})` : ''}</label>)}
-        </details></td>
-        <td><details><summary>{cueBindings[row.id]?.length ? t('eventRules.cueCount', { count: cueBindings[row.id].length }) : t('eventRules.allCue')}</summary>
+        </details>}</td>
+        <td>{isPreset ? <span className={styles.hint}>—</span> : <details><summary>{cueBindings[row.id]?.length ? t('eventRules.cueCount', { count: cueBindings[row.id].length }) : t('eventRules.allCue')}</summary>
           <button disabled={busy} onClick={() => setCueBindings(previous => ({ ...previous, [row.id]: [] }))}>{t('eventRules.allCue')}</button>
           {Array.from(new Set([...cues.map(c => c.id), ...(cueBindings[row.id] || [])])).map(id => <label className={styles.poi} key={id}><input type="checkbox" disabled={busy} checked={(cueBindings[row.id] || []).includes(id)} onChange={e => setCueBindings(previous => ({ ...previous, [row.id]: e.target.checked ? [...(previous[row.id] || []), id] : (previous[row.id] || []).filter(c => c !== id) }))} />{cues.find(c => c.id === id)?.label || id}{!cues.some(c => c.id === id) ? ` (${t('eventRules.missing')})` : ''}</label>)}
-        </details></td>
-        <td><span className={changed ? styles.dirty : styles.hint}>{!saved.has(row.id) ? t('eventRules.unsaved') : changed ? t('eventRules.modified') : `${t('eventRules.savedState')} · v${row.version}`}</span></td>
+        </details>}</td>
+        <td>{isPreset ? <span className={styles.hint}>{t('eventRules.presetAutoBind')}</span> : <details><summary>{integrityBindings[row.id]?.length ? t('eventRules.integrityCount', { count: integrityBindings[row.id].length }) : t('eventRules.allIntegrity')}</summary>
+          <button disabled={busy} onClick={() => setIntegrityBindings(previous => ({ ...previous, [row.id]: [] }))}>{t('eventRules.allIntegrity')}</button>
+          {Array.from(new Set([...integrity.map(z => z.id), ...(integrityBindings[row.id] || [])])).map(id => <label className={styles.poi} key={id}><input type="checkbox" disabled={busy} checked={(integrityBindings[row.id] || []).includes(id)} onChange={e => setIntegrityBindings(previous => ({ ...previous, [row.id]: e.target.checked ? [...(previous[row.id] || []), id] : (previous[row.id] || []).filter(z => z !== id) }))} />{integrity.find(z => z.id === id)?.label || id}{!integrity.some(z => z.id === id) ? ` (${t('eventRules.missing')})` : ''}</label>)}
+        </details>}</td>
+        <td>{isPreset ? <span className={styles.hint}>{t('eventRules.preset')}</span> : <span className={changed ? styles.dirty : styles.hint}>{!saved.has(row.id) ? t('eventRules.unsaved') : changed ? t('eventRules.modified') : `${t('eventRules.savedState')} · v${row.version}`}</span>}</td>
         <td><div className={styles.actions}>
-          <button disabled={busy} onClick={() => { setEdit(structuredClone(row)); setModalError('') }}>{t('eventRules.edit')}</button>
+          <button disabled={busy || isPreset} onClick={() => { setEdit(structuredClone(row)); setModalError('') }}>{t('eventRules.edit')}</button>
           <button disabled={busy || !changed} onClick={() => void save([row.id])}>{t('eventRules.save')}</button>
           <button disabled={busy || !changed} onClick={() => { const old = saved.get(row.id); if (old) stage(old); else { setRows(previous => previous.filter(r => r.id !== row.id)); setSelected(previous => previous.filter(id => id !== row.id)) } }}>{t('eventRules.undo')}</button>
-          <button disabled={busy} onClick={() => stage({ ...structuredClone(row), id: newRuleId(), name: `${row.name.slice(0, 140)} (${t('eventRules.copy')})`, version: 0 })}>{t('eventRules.copy')}</button>
-          <button disabled={busy} onClick={() => { setDeleting([row.id]); setModalError('') }}>{t('eventRules.delete')}</button>
+          <button disabled={busy || isPreset} onClick={() => stage({ ...structuredClone(row), id: newRuleId(), name: `${row.name.slice(0, 140)} (${t('eventRules.copy')})`, version: 0 })}>{t('eventRules.copy')}</button>
+          <button disabled={busy || isPreset} onClick={() => { setDeleting([row.id]); setModalError('') }}>{t('eventRules.delete')}</button>
         </div></td>
       </tr>
     })}</tbody></table></div>

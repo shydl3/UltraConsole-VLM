@@ -107,15 +107,18 @@ export function ReviewVideo({ src, markers, preRoll, onPreRoll, follow, onFollow
     </div>}
     {transport && <div className={styles.timeline} role="group" aria-label={t('review.timeline')}>
       <div className={styles.track} />
-      {duration > 0 && markers.map(marker => <button
-        key={marker.resultId}
-        type="button"
-        className={[styles.tick, styles[decisionTone(marker)]].join(' ')}
-        style={{ left: `${Math.min(100, Math.max(0, (marker.triggerSec / duration) * 100))}%` }}
-        title={`#${marker.trackId} · ${marker.triggerSec.toFixed(2)}s · ${t(decisionKey(marker))}`}
-        aria-label={`${t('review.jump')} #${marker.trackId} ${marker.triggerSec.toFixed(2)}s`}
-        onClick={() => onJump(marker)}
-      />)}
+      {duration > 0 && markers.map(marker => {
+        const label = marker.triggerKind === 'integrity.change' ? (marker.poiId || 'ROI') : `#${marker.trackId}`
+        return <button
+          key={marker.resultId}
+          type="button"
+          className={[styles.tick, styles[decisionTone(marker)]].join(' ')}
+          style={{ left: `${Math.min(100, Math.max(0, (marker.triggerSec / duration) * 100))}%` }}
+          title={`${label} · ${marker.triggerSec.toFixed(2)}s · ${t(decisionKey(marker))}`}
+          aria-label={`${t('review.jump')} ${label} ${marker.triggerSec.toFixed(2)}s`}
+          onClick={() => onJump(marker)}
+        />
+      })}
       {duration > 0 && !markers.length && <span className={styles.hint}>{t('review.noMarkers')}</span>}
     </div>}
   </>

@@ -94,7 +94,7 @@ export function LibraryPage() {
     <header className={styles.header}>
       <div><span className={styles.brand}>ULTRACONSOLE / LIBRARY</span><h1>{t('library.title')}</h1><p className={styles.muted}>{t('library.subtitle')}</p></div>
       <div className={styles.actions}>
-        <button className={styles.link} onClick={() => setView('console')}>{t('library.console')}</button>
+        <button className={styles.link} onClick={() => setView('console')}>← {t('library.back')}</button>
         <button onClick={() => setLocale(locale === 'zh' ? 'en' : 'zh')}>{locale === 'zh' ? 'EN' : '中文'}</button>
         <button onClick={() => { setLoading(true); refresh() }}>{t('library.refresh')}</button>
       </div>

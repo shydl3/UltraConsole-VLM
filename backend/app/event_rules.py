@@ -12,9 +12,27 @@ from fastapi import HTTPException
 from pydantic import Field, field_validator, model_validator
 
 from . import vlm_jobs
-from .vlm_jobs import AnalysisParameters, CueDefinition, EventDefinition, Identifier, Poi, RunRequest, StrictModel
+from .vlm_jobs import AnalysisParameters, CueDefinition, EventDefinition, Identifier, IntegrityZone, Poi, RunRequest, StrictModel
 
 _lock = threading.RLock()
+
+# System-managed integrity rule: auto-bound to every drawn integrity zone whenever
+# a run contains zones; users never edit or bind it manually.
+PRESET_INTEGRITY_ID = "preset_integrity"
+PRESET_INTEGRITY_RULE = {
+    "id": PRESET_INTEGRITY_ID,
+    "name": "完整性检测（预设）",
+    "description": "完整性检测区是否出现持续性画面改变（围墙、门体等静态设施被改动）",
+    "enabled": True,
+    "poiIds": [],
+    "cueIds": [],
+    "integrityIds": [],
+    "triggerKinds": ["integrity.change"],
+    "preSeconds": 4,
+    "postSeconds": 6,
+    "criteria": [],
+    "uncertainWhen": [],
+}
 
 
 class Rule(EventDefinition):
@@ -34,6 +52,8 @@ class Rule(EventDefinition):
             raise ValueError("POI bindings belong to the current analysis, not the rule template")
         if self.cueIds:
             raise ValueError("Cue bindings belong to the current analysis, not the rule template")
+        if self.integrityIds:
+            raise ValueError("Integrity bindings belong to the current analysis, not the rule template")
         return self
 
 
@@ -55,14 +75,22 @@ class Selection(StrictModel):
     version: int = Field(ge=1)
     poiIds: list[Identifier] = Field(default_factory=list, max_length=50)
     cueIds: list[Identifier] = Field(default_factory=list, max_length=20)
+    integrityIds: list[Identifier] = Field(default_factory=list, max_length=20)
 
 
 class ManagedRun(AnalysisParameters):
     videoId: Identifier
-    pois: list[Poi] = Field(min_length=1, max_length=50)
+    pois: list[Poi] = Field(default_factory=list, max_length=50)
     cues: list[CueDefinition] = Field(default_factory=list, max_length=20)
+    integrityZones: list[IntegrityZone] = Field(default_factory=list, max_length=20)
     selections: list[Selection] = Field(min_length=1, max_length=30)
     revision: int = Field(ge=0)
+
+    @model_validator(mode="after")
+    def has_targets(self):
+        if not self.pois and not self.integrityZones:
+            raise ValueError("At least one POI or integrity zone is required")
+        return self
 
 
 @contextmanager
@@ -90,9 +118,14 @@ def _load(root: Path):
         value = vlm_jobs.read_json(path)
         if not isinstance(value["revision"], int) or not isinstance(value["rules"], list):
             raise ValueError("Invalid rule library")
-        return value
     except (ValueError, KeyError, TypeError) as exc:
         raise HTTPException(500, "Rule library is unreadable; existing file was preserved") from exc
+    # Migrate existing non-empty libraries once; a deliberately empty library stays empty.
+    if value["rules"] and not any(row["id"] == PRESET_INTEGRITY_ID for row in value["rules"]):
+        now = time.time()
+        value["rules"].append({**PRESET_INTEGRITY_RULE, "version": 1, "createdAt": now, "updatedAt": now})
+        vlm_jobs.write_json(path, value)
+    return value
 
 
 def load(root: Path):
@@ -130,20 +163,38 @@ def resolve(root: Path, request: ManagedRun):
         rows = {row["id"]: row for row in library["rules"]}
         events, snapshots = [], []
         for selection in request.selections:
+            if selection.id == PRESET_INTEGRITY_ID:
+                continue  # auto-managed below, never taken from user bindings
             row = rows.get(selection.id)
             if not row or row["version"] != selection.version or not row["enabled"]:
                 raise HTTPException(409, f"Rule changed, disabled or deleted: {selection.id}")
-            event = {key: row.get(key) for key in EventDefinition.model_fields}
+            event = {key: row[key] for key in EventDefinition.model_fields if key in row}
             event["poiIds"] = selection.poiIds
             event["cueIds"] = selection.cueIds
+            event["integrityIds"] = selection.integrityIds
             applicable = [poi for poi in request.pois if not selection.poiIds or poi.id in selection.poiIds]
-            if not any(set(event["triggerKinds"]) & ({"line.cross"} if poi.kind == "line" else {"zone.enter", "zone.leave", "initial_inside"}) for poi in applicable):
+            poi_ok = any(set(event["triggerKinds"]) & ({"line.cross"} if poi.kind == "line" else {"zone.enter", "zone.leave", "initial_inside"}) for poi in applicable)
+            integrity_applicable = [z for z in request.integrityZones if not selection.integrityIds or z.id in selection.integrityIds]
+            integrity_ok = "integrity.change" in event["triggerKinds"] and bool(integrity_applicable)
+            if not poi_ok and not integrity_ok:
                 raise HTTPException(422, f"Rule has no compatible POI/trigger: {row['name']}")
             cue_ids = {cue.id for cue in request.cues}
             if set(selection.cueIds) - cue_ids:
                 raise HTTPException(422, f"Rule references an unknown cue: {row['name']}")
+            if set(selection.integrityIds) - {z.id for z in request.integrityZones}:
+                raise HTTPException(422, f"Rule references an unknown integrity zone: {row['name']}")
             events.append(event)
             snapshots.append({"id": row["id"], "name": row["name"], "version": row["version"], "event": copy.deepcopy(event)})
+        if request.integrityZones:
+            preset_row = rows.get(PRESET_INTEGRITY_ID)
+            source = preset_row or PRESET_INTEGRITY_RULE
+            preset = {key: source[key] for key in EventDefinition.model_fields if key in source}
+            preset.update(enabled=True, poiIds=[], cueIds=[],
+                          integrityIds=[zone.id for zone in request.integrityZones])
+            events.append(preset)
+            snapshots.append({"id": PRESET_INTEGRITY_ID, "name": source["name"],
+                              "version": preset_row["version"] if preset_row else None,
+                              "event": copy.deepcopy(preset)})
         values = request.model_dump(exclude={"revision", "selections"})
         try:
             run = RunRequest.model_validate({**values, "events": events})

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 
-from .contracts import EventDefinition
+from .contracts import EventDefinition, IntegrityZone
 
 PROMPT_VERSION = "target-event-described-json-v6"
 
@@ -55,4 +55,26 @@ def prompt(candidate: dict, event: EventDefinition, manifest: dict, *, retry: bo
         + cue_note
         + ("\n上次回答格式无效或缺少字段。本次必须输出完整且合法的上述五字段JSON，conditions数组覆盖全部判定条件，"
            "保留具体的视频过程描述和判断依据，控制在建议长度内并正确闭合引号和花括号。" if retry else "")
+    )
+
+
+def integrity_prompt(zone: IntegrityZone, event: EventDefinition, interval: dict):
+    """Two-image structural-change review for a confirmed integrity interval."""
+    criteria = event.criteria or [event.description]
+    return (
+        "你是视频完整性复核助手。两帧画面是同一固定区域（围墙、门体等静态设施）在不同时刻的裁剪图："
+        "第一帧为基线画面，第二帧为检测到变化后的画面。黄色多边形边框是人工标注，不是现场物体。"
+        "判断该区域是否发生结构性改变：新增或移除物体、破损、涂鸦、开闭状态变化等。"
+        "整体亮度/色温漂移、阴影、人车短暂遮挡、轻微抖动不算结构性改变。\n"
+        f"区域：{zone.label or zone.id}\n"
+        f"事件描述：{event.description}\n"
+        f"判定条件：{json.dumps(criteria, ensure_ascii=False)}\n"
+        f"确定性测量：变化起始约 {interval['onsetSec']:.1f}s，峰值变化像素占比 {interval['peakRatio']:.1%}。\n"
+        "仅输出一个JSON对象，按顺序包含videoDescription、conditions、decision、confidence、reason五个字段，不输出Markdown或其他文字。\n"
+        "videoDescription：用1到2句中文描述两帧之间可见的差异。\n"
+        "conditions：数组逐项对应判定条件，每项形如{\"index\":序号(从0开始),\"status\":\"yes或no或unknown\",\"evidenceTimeSec\":null}。"
+        "必须覆盖全部条件、index不重复不越界。\n"
+        "decision由conditions推导：全部yes才match，任一no则no_match，其余uncertain；match表示确认发生结构性改变。"
+        "confidence取0到1的数值，不确定可写null。\n"
+        "reason：用1句中文说明依据。输出右花括号后立即结束。"
     )

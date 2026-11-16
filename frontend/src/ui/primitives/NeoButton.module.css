@@ -15,6 +15,13 @@
   box-shadow: var(--shadow-inset-strong);
 }
 
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+  transform: none;
+  box-shadow: var(--shadow-inset);
+}
+
 .danger {
   border-color: rgba(255, 70, 70, 0.5);
   color: var(--danger);

@@ -52,6 +52,71 @@
   flex: 1;
 }
 
+.roiMenu {
+  position: relative;
+}
+
+.roiPop {
+  position: absolute;
+  top: calc(100% + 8px);
+  left: 0;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 168px;
+  padding: 10px;
+  border: 1px solid var(--line-0);
+  border-radius: 12px;
+  background: var(--panel-0);
+  box-shadow: var(--shadow-out);
+}
+
+.roiPop > button {
+  width: 100%;
+  text-align: left;
+}
+
+.roiActive {
+  border-color: rgba(45, 212, 255, 0.55);
+  color: #2dd4ff;
+}
+
+.roiHint {
+  color: var(--fg-2);
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+/* 绘制模式高亮：颜色与画布上对应区域/草稿色一致 */
+.toolbar .toolLine {
+  border-color: rgba(255, 215, 0, 0.85);
+  color: #ffd700;
+  background: rgba(255, 215, 0, 0.14);
+  box-shadow: 0 0 10px rgba(255, 215, 0, 0.28), var(--shadow-inset);
+}
+
+.toolbar .toolZone {
+  border-color: rgba(255, 99, 132, 0.85);
+  color: #ff6384;
+  background: rgba(255, 99, 132, 0.14);
+  box-shadow: 0 0 10px rgba(255, 99, 132, 0.28), var(--shadow-inset);
+}
+
+.toolbar .toolCue {
+  border-color: rgba(34, 221, 255, 0.85);
+  color: #22ddff;
+  background: rgba(34, 221, 255, 0.14);
+  box-shadow: 0 0 10px rgba(34, 221, 255, 0.28), var(--shadow-inset);
+}
+
+.toolbar .toolIntegrity {
+  border-color: rgba(255, 193, 7, 0.85);
+  color: #ffc107;
+  background: rgba(255, 193, 7, 0.14);
+  box-shadow: 0 0 10px rgba(255, 193, 7, 0.28), var(--shadow-inset);
+}
+
 .meta {
   font-family: ui-monospace, Menlo, Monaco, Consolas, 'Liberation Mono', 'Courier New', monospace;
   color: var(--fg-2);

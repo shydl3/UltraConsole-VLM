@@ -2,13 +2,13 @@ import type { EventsConfig } from '../api/contracts'
 import type { VlmParameters } from './vlmParameters'
 
 export type VlmEventDefinition = {
-  id: string; description: string; enabled?: boolean; poiIds?: string[]; cueIds?: string[]; triggerKinds?: string[]
+  id: string; description: string; enabled?: boolean; poiIds?: string[]; cueIds?: string[]; integrityIds?: string[]; triggerKinds?: string[]
   preSeconds?: number; postSeconds?: number; criteria?: string[]; uncertainWhen?: string[]
 }
 export type VlmProgress = {
   stage?: string; sampledFrames?: number; candidateCount?: number; trackingFraction?: number
   mediaTimeSec?: number; completedRequests?: number; totalRequests?: number; failedRequests?: number
-  currentSegment?: number; segmentCount?: number
+  currentSegment?: number; segmentCount?: number; zoneCount?: number; integrityFraction?: number
 }
 export type VlmRun = {
   runId: string; videoId: string; fileName?: string; state: string; error?: string
@@ -25,36 +25,44 @@ export type VlmTask = {
 export type VlmCondition = {
   index: number; value: 'yes' | 'no' | 'unknown'; evidenceTimeSec?: number | null; frameIndex?: number | null
 }
+export type VlmIntegrityEvidence = {
+  zoneId: string; label: string; onsetSec: number | null; offsetSec: number | null; confirmedSec: number | null
+  peakRatio: number; sampleFps: number; confirmSec: number
+  changed?: boolean; sampleCount?: number; baselineSec?: number | null
+  before?: string; after?: string; diff?: string; context?: string
+}
 export type VlmResult = {
-  resultId: string; trackId: number; trackSegmentId: string; poiId: string; triggerSec: number
+  resultId: string; trackId?: number | null; trackSegmentId?: string; poiId: string; triggerSec: number
   triggerKind: string; eventDefinitionId: string; description: string; decision: string
   inferenceStatus: string; modelDecisionConfidence: number | null; reason: string; error?: string
   modelDecision?: string; videoDescription?: string | null; deterministicDecision?: string
   eventCriteria?: string[]; conditions?: VlmCondition[]
   cueEvidence?: { cueIds: string[]; state: string; onsetSec: number | null }
+  integrityEvidence?: VlmIntegrityEvidence
   previewPath?: string; downgradeReasons?: string[]; qualityWarnings?: string[]; postprocessVersion?: string
   segments?: { previewPath?: string; reason?: string; videoDescription?: string | null; decision?: string; conditions?: VlmCondition[]; rawOutputPath?: string; sampleManifest?: string; window: { startSec: number; endSec: number } }[]
 }
 
-export const activeVlm = (state: string) => ['queued', 'tracking', 'cues', 'understanding', 'cancelling'].includes(state)
+export const activeVlm = (state: string) => ['queued', 'tracking', 'cues', 'integrity', 'understanding', 'cancelling'].includes(state)
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 
 /**
  * Overall task percentage from the per-phase counters written by the worker.
  * Weights mirror the pipeline: segmentation 4%, pose tracking 40%, cue
- * detection 6%, Qwen judgments the remaining 50%.
+ * detection 6%, integrity detection 4%, Qwen judgments the remaining 46%.
  */
 export function vlmProgress(run: Pick<VlmRun, 'state'> & { progress?: VlmProgress }): { percent: number; stage: string | null } {
   const p = run.progress ?? {}
   const tracking = 4 + 40 * clamp(p.trackingFraction ?? 0, 0, 1)
   const total = p.totalRequests ?? 0
-  const judgments = total > 0 ? 50 + 49 * clamp((p.completedRequests ?? 0) / total, 0, 1) : 50
+  const judgments = total > 0 ? 54 + 45 * clamp((p.completedRequests ?? 0) / total, 0, 1) : 54
   switch (run.state) {
     case 'queued': return { percent: 0, stage: 'queued' }
     case 'segment': return { percent: 4, stage: 'segment' }
     case 'tracking': return { percent: Math.round(tracking), stage: 'tracking' }
     case 'cues': return { percent: 46, stage: 'cues' }
+    case 'integrity': return { percent: Math.round(50 + 4 * clamp(p.integrityFraction ?? 0, 0, 1)), stage: 'integrity' }
     case 'understanding': return { percent: Math.round(judgments), stage: 'understanding' }
     case 'completed':
     case 'partial': return { percent: 100, stage: 'understanding' }
@@ -85,6 +93,11 @@ export function mergeVlmTasks(local: VlmTask[], runs: VlmRun[]): VlmTask[] {
 
 export const CUE_DEFAULTS = { minOnRatio: 0.06, minR: 120, minRG: 50, minRB: 50, minOnSec: 0.2, minOffSec: 0.2, sampleFps: 10 }
 
+export const INTEGRITY_DEFAULTS = {
+  sampleFps: 0.5, baselineFrames: 5, pixelThreshold: 25, changeRatio: 0.04, confirmSec: 10,
+  edgeWeight: 0.5, minBlobRatio: 0.005, alignTolerance: 0.02, ignoreDetections: true, vlmReview: false,
+}
+
 export type VlmPoi = {
   id: string; label: string; kind: string; points: number[][]; anchor: string
   entryDirection?: 'positive_to_negative' | 'negative_to_positive' | null
@@ -107,6 +120,22 @@ export function vlmCues(config: EventsConfig) {
     minOnSec: c.minOnSec ?? CUE_DEFAULTS.minOnSec,
     minOffSec: c.minOffSec ?? CUE_DEFAULTS.minOffSec,
     sampleFps: c.sampleFps ?? CUE_DEFAULTS.sampleFps,
+  }))
+}
+
+export function vlmIntegrity(config: EventsConfig) {
+  return (config.integrity || []).map(z => ({
+    id: z.id, label: z.name || z.id, points: z.polygon.map(p => [p.x, p.y]),
+    sampleFps: z.sampleFps ?? INTEGRITY_DEFAULTS.sampleFps,
+    baselineFrames: z.baselineFrames ?? INTEGRITY_DEFAULTS.baselineFrames,
+    pixelThreshold: z.pixelThreshold ?? INTEGRITY_DEFAULTS.pixelThreshold,
+    changeRatio: z.changeRatio ?? INTEGRITY_DEFAULTS.changeRatio,
+    confirmSec: z.confirmSec ?? INTEGRITY_DEFAULTS.confirmSec,
+    edgeWeight: z.edgeWeight ?? INTEGRITY_DEFAULTS.edgeWeight,
+    minBlobRatio: z.minBlobRatio ?? INTEGRITY_DEFAULTS.minBlobRatio,
+    alignTolerance: z.alignTolerance ?? INTEGRITY_DEFAULTS.alignTolerance,
+    ignoreDetections: z.ignoreDetections ?? INTEGRITY_DEFAULTS.ignoreDetections,
+    vlmReview: z.vlmReview ?? INTEGRITY_DEFAULTS.vlmReview,
   }))
 }
 

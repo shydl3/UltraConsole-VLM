@@ -43,7 +43,7 @@ def prepare(run_dir: Path, request: RunRequest, source: Path, video: dict, data_
 def main():
     parser = argparse.ArgumentParser(description="POI-triggered Qwen3-VL offline analysis")
     sub = parser.add_subparsers(dest="command", required=True)
-    for phase in ("segment", "tracking", "cues", "understanding", "reprocess"):
+    for phase in ("segment", "tracking", "cues", "integrity", "understanding", "reprocess"):
         sub.add_parser(phase).add_argument("--run-dir", type=Path, required=True)
     analyze = sub.add_parser("analyze")
     analyze.add_argument("--input", type=Path, required=True)
@@ -53,6 +53,9 @@ def main():
     calibrate = sub.add_parser("calibrate")
     calibrate.add_argument("--input", type=Path, required=True)
     calibrate.add_argument("--cue", type=Path, required=True, help="CueDefinition JSON (id + points polygon)")
+    calibrate_integrity = sub.add_parser("calibrate-integrity")
+    calibrate_integrity.add_argument("--input", type=Path, required=True)
+    calibrate_integrity.add_argument("--zone", type=Path, required=True, help="IntegrityZone JSON (id + points polygon)")
     args = parser.parse_args()
     if args.command == "segment":
         from .segmenting import run_segment_phase
@@ -62,6 +65,9 @@ def main():
         track(args.run_dir)
     elif args.command == "cues":
         from .cues import detect_run
+        detect_run(args.run_dir)
+    elif args.command == "integrity":
+        from .integrity import detect_run
         detect_run(args.run_dir)
     elif args.command == "understanding":
         from .qwen_worker import understand
@@ -77,6 +83,14 @@ def main():
         meta = probe(source)
         cue = CueDefinition.model_validate(read_json(args.cue))
         print(json.dumps(calibrate(source, meta, cue), ensure_ascii=False, indent=2))
+    elif args.command == "calibrate-integrity":
+        from .contracts import IntegrityZone
+        from .integrity import calibrate
+        from .media import probe
+        source = args.input.resolve()
+        meta = probe(source)
+        zone = IntegrityZone.model_validate(read_json(args.zone))
+        print(json.dumps(calibrate(source, meta, zone), ensure_ascii=False, indent=2))
     else:
         from .media import probe
         from .runner import run

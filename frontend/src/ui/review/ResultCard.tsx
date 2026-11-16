@@ -50,10 +50,11 @@ export const ResultCard = memo(function ResultCard({ result, runId, ruleName, ex
   onSeek: (sec: number) => void
 }) {
   const t = useT()
+  const integrity = result.triggerKind === 'integrity.change' ? result.integrityEvidence : undefined
   return <article id={`result-${result.resultId}`} className={[styles.card, active ? styles.cardActive : ''].filter(Boolean).join(' ')}>
     <div className={styles.cardHead}>
       <button type="button" className={styles.cardTitle} aria-expanded={expanded} onClick={() => onToggle(result.resultId)}>
-        #{result.trackId} · {result.triggerSec.toFixed(2)}s · {result.poiId}
+        {integrity ? `${integrity.label} · ${result.triggerSec.toFixed(2)}s` : `#${result.trackId} · ${result.triggerSec.toFixed(2)}s · ${result.poiId}`}
       </button>
       <span className={[styles.badge, styles[decisionTone(result)]].join(' ')}>{t(decisionKey(result))}</span>
     </div>
@@ -68,6 +69,33 @@ export const ResultCard = memo(function ResultCard({ result, runId, ruleName, ex
       {result.deterministicDecision && <div className={styles.section}>
         {t('vlm.deterministic')}: {t(`vlm.${result.deterministicDecision}`)}
         {result.cueEvidence ? ` · ${t('vlm.cueState')}=${result.cueEvidence.state}${result.cueEvidence.onsetSec != null ? ` @${result.cueEvidence.onsetSec.toFixed(2)}s` : ''}` : ''}
+      </div>}
+      {integrity && <div className={styles.section}>
+        <strong>{t('vlm.integrityEvidence')}</strong>
+        {integrity.changed === false ? <span>
+          {t('vlm.integrityNegative')}
+          {integrity.sampleCount != null ? ` · ${t('vlm.integritySamples', { count: integrity.sampleCount })}` : ''}
+          {integrity.baselineSec != null ? ` · ${t('vlm.integrityMonitorFrom')} ${integrity.baselineSec.toFixed(1)}s` : ''}
+        </span> : <>
+          <span>
+            {t('vlm.integrityOnset')} {integrity.onsetSec?.toFixed(2) ?? '—'}s · {t('vlm.integrityPeak')} {(integrity.peakRatio * 100).toFixed(1)}%
+            {integrity.offsetSec != null && integrity.onsetSec != null
+              ? ` · ${t('vlm.integrityDuration')} ${(integrity.offsetSec - integrity.onsetSec).toFixed(1)}s`
+              : ` · ${t('vlm.integrityToEndTime')}`}
+          </span>
+          <div className={styles.integrityGrid}>
+            {(['before', 'after', 'diff'] as const).map(key => {
+              const path = integrity[key]
+              if (!path) return null
+              const caption = key === 'before' ? t('vlm.integrityBefore') : key === 'after' ? t('vlm.integrityAfter') : t('vlm.integrityDiff')
+              return <figure key={key} className={styles.integrityFig}>
+                <EvidenceImage runId={runId} path={path} />
+                <figcaption>{caption}</figcaption>
+              </figure>
+            })}
+          </div>
+          {integrity.context && <EvidenceImage runId={runId} path={integrity.context} />}
+        </>}
       </div>}
       <ConditionList conditions={result.conditions} criteria={result.eventCriteria} onSeek={onSeek} />
       <ModelExplanation videoDescription={result.videoDescription} reason={result.reason} />
@@ -84,7 +112,7 @@ export const ResultCard = memo(function ResultCard({ result, runId, ruleName, ex
         <p className={styles.muted}>{segment.window.startSec.toFixed(2)}–{segment.window.endSec.toFixed(2)}s</p>
         <ModelExplanation videoDescription={segment.videoDescription} reason={segment.reason} />
         <ConditionList conditions={segment.conditions} criteria={result.eventCriteria} onSeek={onSeek} />
-        {segment.previewPath && <EvidenceImage runId={runId} path={segment.previewPath} />}
+        {segment.previewPath && !integrity && <EvidenceImage runId={runId} path={segment.previewPath} />}
       </div>)}
     </>}
   </article>

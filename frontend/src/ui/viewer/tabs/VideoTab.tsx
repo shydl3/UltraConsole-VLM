@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
-import { EventEditOverlay } from '../widgets/EventEditOverlay'
+import { EventEditOverlay, type EventEditOverlayHandle } from '../widgets/EventEditOverlay'
 import { newTrackerState } from '../../../utils/events'
 import { createVideoReport, formatVideoTime, recordVideoFrame, seekVideo, VideoInferenceSession, videoReportCsv, type VideoReport } from '../../../utils/videoAnalysis'
 import { useT } from '../../../i18n'
@@ -43,7 +43,10 @@ export function VideoTab() {
   const [videoLoaded, setVideoLoaded] = useState(false)
   const [targetFps, setTargetFps] = useState(8)
   const [dragOver, setDragOver] = useState(false)
-  const [editTool, setEditTool] = useState<'none' | 'line' | 'zone' | 'cue'>('none')
+  const [editTool, setEditTool] = useState<'none' | 'line' | 'zone' | 'cue' | 'integrity'>('none')
+  const [roiMenuOpen, setRoiMenuOpen] = useState(false)
+  const roiMenuRef = useRef<HTMLDivElement | null>(null)
+  const editOverlayRef = useRef<EventEditOverlayHandle | null>(null)
   const [error, setError] = useState('')
   const modelId = useConsoleStore((s) => s.currentModelId)
   const eventsConfig = useConsoleStore((s) => s.eventsConfig)
@@ -68,6 +71,24 @@ export function VideoTab() {
   }, [lastPred, params.classFilter, roi.applyFilter, roi.polygon])
   const bboxes = useMemo(() => filteredPred?.bboxes ?? [], [filteredPred])
 
+  // ROI 子菜单：点击外部或按 Esc 关闭；分析中自动收起
+  const roiMenuVisible = roiMenuOpen && !running
+  useEffect(() => {
+    if (!roiMenuVisible) return
+    function onPointerDown(e: PointerEvent) {
+      if (roiMenuRef.current && !roiMenuRef.current.contains(e.target as Node)) setRoiMenuOpen(false)
+    }
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Escape') setRoiMenuOpen(false)
+    }
+    document.addEventListener('pointerdown', onPointerDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [roiMenuVisible])
+
   useEffect(() => {
     return () => {
       abortRef.current?.abort()
@@ -87,6 +108,7 @@ export function VideoTab() {
     video.pause()
     setRoi({ enabled: false })
     setEditTool('none')
+    setRoiMenuOpen(false)
     setError('')
     setRunning(true)
     setLastPred(undefined)
@@ -221,10 +243,16 @@ export function VideoTab() {
     setTimeout(() => URL.revokeObjectURL(url), 1000)
   }
 
-  function edit(mode: 'line' | 'zone' | 'cue') {
+  function edit(mode: 'line' | 'zone' | 'cue' | 'integrity') {
     videoRef.current?.pause()
     setRoi({ enabled: false })
-    setEditTool(editTool === mode ? 'none' : mode)
+    if (editTool === mode) {
+      // 再次点击同一工具 = 完成绘制：提交未闭合草稿后退出绘制模式。
+      editOverlayRef.current?.finish()
+      setEditTool('none')
+    } else {
+      setEditTool(mode)
+    }
   }
 
   function flipEntryDirection() {
@@ -253,20 +281,23 @@ export function VideoTab() {
           <NeoButton tone="danger" onClick={() => abortRef.current?.abort()}>{t('common.stop')}</NeoButton>
         )}
         <NeoButton onClick={exportReport} disabled={running || !report || report.frames === 0}>{t('video.exportReport')}</NeoButton>
-        <NeoButton onClick={() => edit('line')} disabled={running || !videoLoaded}>
+        <NeoButton onClick={() => edit('line')} disabled={running || !videoLoaded} className={editTool === 'line' ? styles.toolLine : undefined}>
           {t(editTool === 'line' ? 'video.finishEdit' : 'video.drawLine')}
         </NeoButton>
         <NeoButton onClick={flipEntryDirection} disabled={running || !eventsConfig.lines.length}>
           {t('video.entryDirection')}{lastLine?.entryDirection ? (lastLine.entryDirection === 'negative_to_positive' ? ' →' : ' ←') : ` (${t('video.entryBoth')})`}
         </NeoButton>
-        <NeoButton onClick={() => edit('zone')} disabled={running || !videoLoaded}>
+        <NeoButton onClick={() => edit('zone')} disabled={running || !videoLoaded} className={editTool === 'zone' ? styles.toolZone : undefined}>
           {t(editTool === 'zone' ? 'video.finishEdit' : 'video.drawZone')}
         </NeoButton>
-        <NeoButton onClick={() => edit('cue')} disabled={running || !videoLoaded}>
+        <NeoButton onClick={() => edit('cue')} disabled={running || !videoLoaded} className={editTool === 'cue' ? styles.toolCue : undefined}>
           {t(editTool === 'cue' ? 'video.finishEdit' : 'video.drawCue')}
         </NeoButton>
-        <NeoButton disabled={running || (!eventsConfig.lines.length && !eventsConfig.zones.length && !(eventsConfig.cues?.length))} onClick={() => {
-          useConsoleStore.getState().setEventsConfig({ lines: [], zones: [], cues: [] })
+        <NeoButton onClick={() => edit('integrity')} disabled={running || !videoLoaded} className={editTool === 'integrity' ? styles.toolIntegrity : undefined}>
+          {t(editTool === 'integrity' ? 'video.finishEdit' : 'video.drawIntegrity')}
+        </NeoButton>
+        <NeoButton disabled={running || (!eventsConfig.lines.length && !eventsConfig.zones.length && !(eventsConfig.cues?.length) && !(eventsConfig.integrity?.length))} onClick={() => {
+          useConsoleStore.getState().setEventsConfig({ lines: [], zones: [], cues: [], integrity: [] })
           setEditTool('none')
         }}>{t('video.clearRules')}</NeoButton>
 
@@ -287,18 +318,33 @@ export function VideoTab() {
 
         <div className={styles.divider} />
 
-        <NeoButton onClick={() => { setEditTool('none'); setRoi({ enabled: !roi.enabled }) }} disabled={!videoLoaded || running}>
-          ROI
-        </NeoButton>
-        <NeoButton onClick={() => setRoi({ mode: roi.mode === 'rect' ? 'poly' : 'rect' })} disabled={!roi.enabled}>
-          {roi.mode === 'rect' ? t('common.rectangle') : t('common.polygon')}
-        </NeoButton>
-        <NeoButton onClick={() => setRoi({ polygon: [], closed: false })} disabled={!roi.enabled || roi.polygon.length === 0}>
-          {t('common.clearRoi')}
-        </NeoButton>
-        <NeoButton onClick={() => setRoi({ closed: false })} disabled={!roi.enabled || !roi.closed}>
-          {t('common.continueEdit')}
-        </NeoButton>
+        <div className={styles.roiMenu} ref={roiMenuRef}>
+          <NeoButton
+            onClick={() => setRoiMenuOpen((v) => !v)}
+            aria-haspopup="menu"
+            aria-expanded={roiMenuVisible}
+            className={roi.enabled ? styles.roiActive : undefined}
+          >
+            {t('common.editRoi')} {roiMenuVisible ? '▴' : '▾'}
+          </NeoButton>
+          {roiMenuVisible && (
+            <div className={styles.roiPop} role="menu" aria-label={t('common.editRoi')}>
+              {!videoLoaded && <div className={styles.roiHint}>{t('common.roiNeedVideo')}</div>}
+              <NeoButton role="menuitem" className={roi.enabled ? styles.roiActive : undefined} disabled={!videoLoaded || running} onClick={() => { setEditTool('none'); setRoi({ enabled: !roi.enabled }) }}>
+                ROI{roi.enabled ? ' · on' : ''}
+              </NeoButton>
+              <NeoButton role="menuitem" onClick={() => setRoi({ mode: roi.mode === 'rect' ? 'poly' : 'rect' })} disabled={!roi.enabled}>
+                {roi.mode === 'rect' ? t('common.rectangle') : t('common.polygon')}
+              </NeoButton>
+              <NeoButton role="menuitem" onClick={() => setRoi({ polygon: [], closed: false })} disabled={!roi.enabled || roi.polygon.length === 0}>
+                {t('common.clearRoi')}
+              </NeoButton>
+              <NeoButton role="menuitem" onClick={() => setRoi({ closed: false })} disabled={!roi.enabled || !roi.closed}>
+                {t('common.continueEdit')}
+              </NeoButton>
+            </div>
+          )}
+        </div>
         <label className={styles.toggle}>
           <input
             type="checkbox"
@@ -317,17 +363,12 @@ export function VideoTab() {
           <input type="checkbox" checked={osd.labels} onChange={() => setOSD({ labels: !osd.labels })} />
           Labels
         </label>
-        <label className={styles.toggle}>
-          <input type="checkbox" checked={osd.heatmap} onChange={() => setOSD({ heatmap: !osd.heatmap })} />
-          {t('common.heatmap')}
-        </label>
-
         <div className={styles.spacer} />
         <div className={styles.meta}>bbox={bboxes.length}</div>
       </div>
 
       <div className={styles.meta}>{t('video.analysisHint')}</div>
-      {editTool !== 'none' && <div className={styles.meta}>{t(editTool === 'line' ? 'video.lineHint' : editTool === 'zone' ? 'video.zoneHint' : 'video.cueHint')}</div>}
+      {editTool !== 'none' && <div className={styles.meta}>{t(editTool === 'line' ? 'video.lineHint' : editTool === 'zone' ? 'video.zoneHint' : editTool === 'cue' ? 'video.cueHint' : 'video.integrityHint')}</div>}
       {report && <div role="status" className={styles.meta}>
         {t(`video.${report.status}`)} · {formatVideoTime(report.analyzedSeconds)} / {formatVideoTime(report.duration)} · {report.frames} {t('video.frames')} · {report.events.length} {t('video.events')}
       </div>}
@@ -364,9 +405,9 @@ export function VideoTab() {
           onPlay={() => { if (abortRef.current) videoRef.current?.pause(); else setLastPred(undefined) }}
           onSeeking={() => { if (!abortRef.current) setLastPred(undefined) }}
         />
-        <VideoCanvasOverlay videoRef={videoRef} pred={filteredPred} showBBox={osd.bbox} showLabels={osd.labels} showHeatmap={osd.heatmap} />
+        <VideoCanvasOverlay videoRef={videoRef} pred={filteredPred} showBBox={osd.bbox} showLabels={osd.labels} />
         <RoiOverlay anchorRef={videoRef} />
-        <EventEditOverlay key={editTool} anchorRef={videoRef} enabled={editTool !== 'none'} mode={editTool === 'none' ? 'line' : editTool} />
+        <EventEditOverlay ref={editOverlayRef} key={editTool} anchorRef={videoRef} enabled={editTool !== 'none'} mode={editTool === 'none' ? 'line' : editTool} />
         <TelemetryHUD telemetry={filteredPred?.telemetry} />
         {dragOver && <div className={styles.dropHint}>{t('video.dropHint')}</div>}
       </div>

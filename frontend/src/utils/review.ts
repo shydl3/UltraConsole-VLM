@@ -18,7 +18,9 @@ export type ReviewMarker = {
   resultId: string
   triggerSec: number
   decision: string
-  trackId: number
+  trackId: number | null
+  poiId?: string
+  triggerKind?: string
   inferenceStatus?: string
 }
 
@@ -27,6 +29,7 @@ export type ReviewFacets = {
   inferenceStatus: Record<string, number>
   eventDefinitionId: Record<string, number>
   trackId: Record<string, number>
+  byEvent: Record<string, { match: number; no_match: number; uncertain: number }>
   flagged: number
   total: number
 }
@@ -46,7 +49,7 @@ export const REVIEW_PAGE_SIZE = 50
 
 export const EMPTY_FILTER: ReviewFilter = { sort: 'time', order: 'asc' }
 export const EMPTY_FACETS: ReviewFacets = {
-  decision: {}, inferenceStatus: {}, eventDefinitionId: {}, trackId: {}, flagged: 0, total: 0,
+  decision: {}, inferenceStatus: {}, eventDefinitionId: {}, trackId: {}, byEvent: {}, flagged: 0, total: 0,
 }
 
 /** Serialize the review filters; empty values are omitted so the URL stays readable. */

@@ -412,10 +412,17 @@ def results(run_id: str, offset: int = Query(default=0, ge=0), limit: int = Quer
     counts = {"decision": facets["decision"], "status": facets["inferenceStatus"],
               "event": facets["eventDefinitionId"], "track": facets["trackId"]}
     fields = {"decision": "decision", "status": "inferenceStatus", "event": "eventDefinitionId", "track": "trackId"}
+    # Unfiltered per-rule verdict totals so the review window can show every
+    # rule's coverage (including negative integrity verdicts) at a glance.
+    by_event: dict = {}
     rows = []
     flaggedTotal = 0
     allTotal = 0
     for row in iter_jsonl(folder / "results.jsonl"):
+        row_event, row_decision = row.get("eventDefinitionId"), row.get("decision")
+        if row_event and row_decision in ("match", "no_match", "uncertain"):
+            slot = by_event.setdefault(row_event, {"match": 0, "no_match": 0, "uncertain": 0})
+            slot[row_decision] += 1
         # "All" ignores the mutually exclusive verdict filters it is meant to clear.
         if keeps(row, ("decision", "status", "flag")):
             allTotal += 1
@@ -435,9 +442,11 @@ def results(run_id: str, offset: int = Query(default=0, ge=0), limit: int = Quer
         rows.reverse()
     markers = [{"resultId": row.get("resultId"), "triggerSec": row.get("triggerSec") or 0,
                 "decision": row.get("decision"), "trackId": row.get("trackId"),
+                "poiId": row.get("poiId"), "triggerKind": row.get("triggerKind"),
                 "inferenceStatus": row.get("inferenceStatus")} for row in rows]
     facets["flagged"] = flaggedTotal
     facets["total"] = allTotal
+    facets["byEvent"] = by_event
     return {"items": rows[offset:offset + limit], "total": len(rows), "offset": offset, "limit": limit,
             "facets": facets, "markers": markers}
 

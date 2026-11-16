@@ -60,6 +60,8 @@ def phase_timeout(phase: str, config: dict, run_dir: Path) -> float:
         return max(86400.0, duration * 4)
     if phase == "cues":
         return max(86400.0, duration)
+    if phase == "integrity":
+        return max(86400.0, duration)
     return max(86400.0, duration * 4, count_candidates(run_dir) * 30 + 3600)
 
 
@@ -95,6 +97,10 @@ def run(run_dir: Path):
             phases = [("segment", config["posePython"]), ("tracking", config["posePython"])]
             if config["request"].get("cues"):
                 phases.append(("cues", config["posePython"]))
+            # Integrity detection reuses the tracking observations for occlusion
+            # masking, so it must run after tracking and before understanding.
+            if config["request"].get("integrityZones"):
+                phases.append(("integrity", config["posePython"]))
             phases.append(("understanding", config["qwenPython"]))
             for phase, python in phases:
                 if cancelled or (run_dir / "cancel.requested").exists():

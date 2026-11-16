@@ -217,3 +217,90 @@ def test_invalid_parameters_rejected_before_launch(client, monkeypatch, key, val
     response = client.post('/api/vlm/runs/from-rules', json=start_payload(library, **{key: value}))
     assert response.status_code == 422
     assert not (api.DATA_ROOT / 'runs').exists()
+
+
+def integrity_payload(library, identifier='wall-rule', **changes):
+    item = next(r for r in library['rules'] if r['id'] == identifier)
+    return {'videoId': 'clip', 'revision': library['revision'],
+            'selections': [{'id': identifier, 'version': item['version'], 'poiIds': [], 'integrityIds': ['wall']}],
+            'pois': [],
+            'integrityZones': [{'id': 'wall', 'points': [[.2, .2], [.8, .2], [.8, .8], [.2, .8]]}], **changes}
+
+
+def test_integrity_only_run_resolves_without_pois(client, monkeypatch):
+    library = save(client, [rule('wall-rule', triggerKinds=['integrity.change'])]).json()
+    folder = api.DATA_ROOT / 'uploads/clip'
+    folder.mkdir(parents=True)
+    jobs.write_json(folder / 'video.json', {'fileName': 'clip.mp4', 'sourceName': 'source.mp4', 'sha256': 'abc'})
+    (folder / 'source.mp4').write_bytes(b'test')
+
+    def launch(run_dir, _python):
+        status = jobs.read_json(run_dir / 'status.json')
+        jobs.write_json(run_dir / 'status.json', {**status, 'state': 'completed'})
+    monkeypatch.setattr(jobs, 'launch', launch)
+    response = client.post('/api/vlm/runs/from-rules', json=integrity_payload(library))
+    assert response.status_code == 200, response.text
+    request = jobs.read_json(api.DATA_ROOT / f'runs/{response.json()["runId"]}/request.json')['request']
+    assert request['pois'] == []
+    assert request['integrityZones'][0]['id'] == 'wall'
+    assert request['integrityZones'][0]['sampleFps'] == 0.5
+    assert request['events'][0]['integrityIds'] == ['wall']
+    assert request['events'][0]['triggerKinds'] == ['integrity.change']
+
+
+def test_integrity_binding_validation(client, monkeypatch):
+    library = save(client, [rule('wall-rule', triggerKinds=['integrity.change'])]).json()
+    def no_launch(*_args):
+        pytest.fail('Invalid integrity bindings must not launch a worker')
+    monkeypatch.setattr(jobs, 'launch', no_launch)
+    payload = integrity_payload(library)
+    payload['selections'][0]['integrityIds'] = ['missing']
+    assert client.post('/api/vlm/runs/from-rules', json=payload).status_code == 422
+    # No POI and no integrity zone at all is not a runnable analysis.
+    payload = integrity_payload(library)
+    payload['integrityZones'] = []
+    payload['selections'][0]['integrityIds'] = []
+    assert client.post('/api/vlm/runs/from-rules', json=payload).status_code == 422
+    # An integrity-only trigger cannot bind to a line POI alone.
+    payload = integrity_payload(library)
+    payload['pois'] = [{'id': 'gate', 'kind': 'line', 'points': [[.1, .5], [.9, .5]]}]
+    payload['integrityZones'] = []
+    payload['selections'][0]['integrityIds'] = []
+    assert client.post('/api/vlm/runs/from-rules', json=payload).status_code == 422
+    # Rule templates must not carry integrity bindings.
+    assert save(client, [rule('bad', integrityIds=['wall'])]).status_code == 422
+
+
+def test_preset_integrity_seeded_auto_bound_and_skipped_without_zones(client, monkeypatch):
+    library = save(client, [rule()]).json()
+    preset = next(r for r in library['rules'] if r['id'] == 'preset_integrity')
+    assert preset['triggerKinds'] == ['integrity.change'] and preset['enabled']
+    folder = api.DATA_ROOT / 'uploads/clip'
+    folder.mkdir(parents=True)
+    jobs.write_json(folder / 'video.json', {'fileName': 'clip.mp4', 'sourceName': 'source.mp4', 'sha256': 'abc'})
+    (folder / 'source.mp4').write_bytes(b'test')
+
+    def launch(run_dir, _python):
+        status = jobs.read_json(run_dir / 'status.json')
+        jobs.write_json(run_dir / 'status.json', {**status, 'state': 'completed'})
+    monkeypatch.setattr(jobs, 'launch', launch)
+
+    payload = start_payload(library)
+    payload['integrityZones'] = [{'id': 'wall', 'points': [[.2, .2], [.8, .2], [.8, .8]]}]
+    payload['selections'].append({'id': 'preset_integrity', 'version': preset['version'], 'poiIds': [], 'cueIds': [], 'integrityIds': []})
+    response = client.post('/api/vlm/runs/from-rules', json=payload)
+    assert response.status_code == 200, response.text
+    rid = response.json()['runId']
+    request = jobs.read_json(api.DATA_ROOT / f'runs/{rid}/request.json')['request']
+    preset_event = next(e for e in request['events'] if e['id'] == 'preset_integrity')
+    assert preset_event['integrityIds'] == ['wall']
+    snapshot = client.get(f'/api/vlm/runs/{rid}/rules').json()
+    assert any(r['id'] == 'preset_integrity' for r in snapshot['rules'])
+
+    # Without integrity zones the preset selection is inert: no preset event runs.
+    payload = start_payload(library)
+    payload['selections'].append({'id': 'preset_integrity', 'version': preset['version'], 'poiIds': [], 'cueIds': [], 'integrityIds': []})
+    response = client.post('/api/vlm/runs/from-rules', json=payload)
+    assert response.status_code == 200, response.text
+    request = jobs.read_json(api.DATA_ROOT / f'runs/{response.json()["runId"]}/request.json')['request']
+    assert [e['id'] for e in request['events']] == ['custom']

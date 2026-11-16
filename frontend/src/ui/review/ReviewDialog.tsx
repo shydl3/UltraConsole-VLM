@@ -9,6 +9,7 @@ import { ParameterSnapshot } from '../vlm/AnalysisParameters'
 import { RuleSnapshotView } from '../vlm/RuleSnapshotView'
 import { ResultCard } from './ResultCard'
 import { ReviewFilters } from './ReviewFilters'
+import { RuleCoverage } from './RuleCoverage'
 import { ReviewVideo, type ReviewVideoHandle } from './ReviewVideo'
 import { useReviewData, type ReviewTarget } from './useReviewData'
 import styles from './ReviewDialog.module.css'
@@ -191,6 +192,7 @@ export function ReviewDialog({ target, onClose, standalone = false }: {
           </details>}
         </div>
         {isRun && <div className={styles.right}>
+          <RuleCoverage rules={data.snapshot?.rules ?? []} byEvent={data.facets.byEvent} onSelect={eventId => patch({ eventId })} />
           <ReviewFilters
             filter={filter}
             facets={data.facets}

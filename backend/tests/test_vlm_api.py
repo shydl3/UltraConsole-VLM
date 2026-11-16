@@ -89,6 +89,8 @@ def test_results_facets_markers_and_filters(client):
     assert page["facets"]["trackId"] == {"3": 2, "8": 1, "9": 1}
     assert page["facets"]["flagged"] == 1
     assert page["facets"]["total"] == 4
+    assert page["facets"]["byEvent"] == {"enter": {"match": 1, "no_match": 1, "uncertain": 0},
+                                         "retreat": {"match": 0, "no_match": 0, "uncertain": 1}}
     assert len(page["markers"]) == 4  # markers cover every hit, not just the page
     assert page["markers"][0]["resultId"] == "r4"
     assert client.get("/api/vlm/runs/facets/results?decision=match").json()["total"] == 1

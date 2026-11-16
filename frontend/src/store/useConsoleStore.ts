@@ -50,7 +50,7 @@ type ConsoleState = {
 export const useConsoleStore = create<ConsoleState>((set, get) => ({
   engine: { device: 'cpu', warming: false },
   params: { conf: 0.25, iou: 0.7, classFilter: [], track: false },
-  osd: { bbox: true, masks: true, keypoints: true, labels: true, heatmap: false },
+  osd: { bbox: true, masks: true, keypoints: true, labels: true },
 
   models: [],
   currentModelId: undefined,
@@ -63,7 +63,7 @@ export const useConsoleStore = create<ConsoleState>((set, get) => ({
   telemetrySummary: {},
   systemStats: undefined,
 
-  eventsConfig: { lines: [], zones: [], cues: [] },
+  eventsConfig: { lines: [], zones: [], cues: [], integrity: [] },
   events: [],
   counters: { byLine: {}, byZone: {} },
 

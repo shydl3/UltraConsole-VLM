@@ -5,8 +5,8 @@ from pathlib import Path
 
 from .contracts import RunRequest
 from .decision import candidate_groups, evaluate, load_cue_timelines, retreat_candidate_ids
-from .prompting import PROMPT_VERSION, prompt
-from .results import aggregate_result, apply_answer, complete_json_answer, parse_answer
+from .prompting import PROMPT_VERSION, integrity_prompt, prompt
+from .results import aggregate_result, apply_answer, complete_json_answer, decision_from_conditions, parse_answer
 from .sampling import build_sample, windows
 from .segmenting import read_manifest
 from .storage import VERSION, append_json, digest, iter_jsonl, progress, read_json, write_json
@@ -217,6 +217,172 @@ def _process_candidate(run_dir, config, request, candidate, events, state, group
                  decisions=state["counts"], currentSegment=state.get("currentSegment", 0))
 
 
+def _integrity_pairs(run_dir, request, events):
+    """Zone-level integrity verdicts paired with their bound event definitions.
+
+    Every zone yields either one pair per confirmed change interval (positive)
+    or a single negative pair when the region stayed static for the whole video,
+    so the preset rule is always visible in the records.
+    """
+    path = run_dir / "integrity.json"
+    if not path.exists():
+        return []
+    zones = {z.id: z for z in request.integrityZones}
+    pairs = []
+    for zone_id, timeline in read_json(path).get("zones", {}).items():
+        zone = zones.get(zone_id)
+        if zone is None:
+            continue
+        intervals = timeline.get("intervals", [])
+        for event in events.values():
+            if "integrity.change" not in event.triggerKinds or (event.integrityIds and zone_id not in event.integrityIds):
+                continue
+            if intervals:
+                for index, interval in enumerate(intervals):
+                    pairs.append((zone, index, interval, event, timeline))
+            else:
+                pairs.append((zone, -1, None, event, timeline))
+    return pairs
+
+
+def _integrity_review_frames(run_dir, evidence, onset, confirmed, duration):
+    """Before/after crops as a two-frame sample for the optional VLM review."""
+    import math
+
+    import numpy as np
+    from PIL import Image
+
+    frames = []
+    for key in ("before", "after"):
+        path = run_dir / evidence.get(key, "")
+        if not path.is_file():
+            return None, None
+        frames.append(np.asarray(Image.open(path).convert("RGB").resize((256, 256), Image.Resampling.BICUBIC)))
+    metadata = {"fps": 1000.0, "duration": duration, "total_num_frames": math.ceil(duration * 1000),
+                "frames_indices": [round(onset * 1000), round(confirmed * 1000)]}
+    return np.stack(frames), metadata
+
+
+def _process_integrity(run_dir, config, request, zone, index, interval, event, state, timeline=None):
+    """Emit one deterministic integrity.change verdict per zone interval.
+
+    Positive intervals become match warnings; a zone without any confirmed
+    interval becomes a single no_match record so negatives stay reviewable.
+    Integrity verdicts come from measurable pixel evidence, not the model; the
+    optional VLM review only re-checks structural vs lighting/occlusion changes.
+    """
+    timeline = timeline or {}
+    negative = interval is None
+    result_id = f"integrity-{zone.id}-{'none' if negative else index}-{event.id}"
+    if result_id in state["completed"]:
+        return
+    duration = float(config["video"]["durationSec"])
+    label = zone.label or zone.id
+    if negative:
+        onset = float(timeline.get("baselineSec") or 0.0)
+        confirmed = onset
+        offset, peak = None, 0.0
+        evidence = {}
+        reason = (f"完整性检测区「{label}」全程未检测到持续画面变化："
+                  f"{timeline.get('sampleCount', 0)} 个抽样样本与基线比对（自 {onset:.1f}s 起监测）。")
+        decision = "no_match"
+    else:
+        onset, confirmed = interval["onsetSec"], interval["confirmedSec"]
+        offset, peak = interval.get("offsetSec"), interval["peakRatio"]
+        evidence = interval.get("evidence") or {}
+        reason = (f"完整性检测区「{label}」自 {onset:.1f}s 起出现持续画面变化："
+                  f"峰值变化占比 {peak:.1%}，持续≥{zone.confirmSec:g}s 后确认")
+        reason += f"，变化持续至 {offset:.1f}s。" if offset is not None else "，变化持续至视频结束。"
+        decision = "match"
+    start = max(0.0, onset - event.preSeconds)
+    end = min(duration, (offset if offset is not None else confirmed) + event.postSeconds)
+    if end <= start:
+        end = min(duration, start + 1.0)
+    quality = {"targetVisibleFraction": 1.0, "identityAmbiguous": False, "timeUnreliable": False,
+               "contextTruncated": False, "medianTargetHeightPx": 256.0, "uniqueFrameCount": 4,
+               "observationContextMissing": False, "evidenceTimeOutsideWindow": False}
+    part = {"window": {"startSec": start, "endSec": end}, "quality": quality,
+            "previewPath": evidence.get("context") or evidence.get("after"), "sampleManifest": None,
+            "decision": decision, "reason": reason, "modelDecisionConfidence": None, "qualityWarnings": []}
+    output = {"schemaVersion": "1", "runId": run_dir.name, "videoId": request.videoId,
+              "resultId": result_id, "poiId": zone.id, "triggerKind": "integrity.change", "triggerSec": onset,
+              "eventDefinitionId": event.id, "description": event.description,
+              "eventCriteria": event.criteria or [event.description],
+              "confidenceType": "deterministic_cv", "modelDecisionConfidence": None,
+              "inferenceStatus": "deterministic", "decision": decision, "deterministicDecision": decision,
+              "integrityEvidence": {"zoneId": zone.id, "label": label,
+                                    "onsetSec": None if negative else onset,
+                                    "offsetSec": offset, "confirmedSec": None if negative else confirmed,
+                                    "peakRatio": peak, "sampleFps": zone.sampleFps,
+                                    "confirmSec": zone.confirmSec, "changed": not negative,
+                                    "sampleCount": timeline.get("sampleCount", 0),
+                                    "baselineSec": timeline.get("baselineSec"), **evidence},
+              "segments": [part], "window": part["window"], "quality": quality,
+              "previewPath": part["previewPath"], "reason": reason,
+              "qualityWarnings": [], "downgradeReasons": []}
+    try:
+        if not negative and zone.vlmReview and not request.dryRun:
+            frames, metadata = _integrity_review_frames(run_dir, evidence, onset, confirmed, duration)
+            if frames is None:
+                part["qualityWarnings"].append("integrity_evidence_missing")
+            else:
+                if state["model"] is None:
+                    state["model"] = Qwen(config["modelPath"])
+                    write_json(run_dir / "runtime.json", state["model"].runtime)
+                model = state["model"]
+                question = integrity_prompt(zone, event, interval)
+                raw_dir = run_dir / "raw"
+                raw_dir.mkdir(exist_ok=True)
+                criteria_count = len(event.criteria or [event.description])
+                last_error = None
+                for attempt in range(2):
+                    (raw_dir / f"{result_id}-{attempt}.prompt.txt").write_text(question, encoding="utf-8")
+                    raw, stats = model.infer(frames, metadata, question, request.maxNewTokens)
+                    raw_path = f"raw/{result_id}-{attempt}.txt"
+                    (run_dir / raw_path).write_text(raw, encoding="utf-8")
+                    try:
+                        if stats["generationTruncated"] and not complete_json_answer(raw):
+                            raise ValueError("generation_truncated_or_timeout")
+                        answer = parse_answer(raw, start, end, criteria_count, trigger=onset, check_timestamps=False)
+                        conj, warnings = decision_from_conditions(answer.conditions, criteria_count)
+                        part.update(decision=conj or answer.decision, modelDecision=answer.decision,
+                                    modelDecisionConfidence=answer.confidence, reason=answer.reason,
+                                    videoDescription=answer.videoDescription,
+                                    conditions=[c.model_dump() for c in answer.conditions],
+                                    qualityWarnings=list(dict.fromkeys(part["qualityWarnings"] + warnings)),
+                                    rawOutputPath=raw_path)
+                        last_error = None
+                        break
+                    except (ValueError, TypeError) as exc:
+                        last_error = exc
+                del frames
+                if last_error:
+                    # A failed review never cancels the measurable CV warning.
+                    part["qualityWarnings"].append("integrity_vlm_review_failed")
+                else:
+                    output["inferenceStatus"] = "succeeded"
+        output["decision"] = part["decision"]
+        output["reason"] = part["reason"]
+        output["modelDecision"] = part.get("modelDecision")
+        output["modelDecisionConfidence"] = part.get("modelDecisionConfidence")
+        output["videoDescription"] = part.get("videoDescription")
+        output["conditions"] = part.get("conditions", [])
+        output["qualityWarnings"] = part["qualityWarnings"]
+        state["counts"][output["decision"]] += 1
+    except Exception as exc:
+        state["failed"] += 1
+        output.update(inferenceStatus="failed", decision="uncertain", error=f"{type(exc).__name__}: {exc}",
+                      reason="完整性证据处理失败，不代表区域未发生变化。")
+        append_json(run_dir / "errors.jsonl", {"resultId": result_id, "error": output["error"]})
+        if state["model"]:
+            state["model"].torch.cuda.empty_cache()
+    append_json(run_dir / "results.jsonl", output)
+    state["completed"].add(result_id)
+    state["done"] += 1
+    progress(run_dir, completedRequests=state["done"], failedRequests=state["failed"],
+             decisions=state["counts"], currentSegment=state.get("currentSegment", 0))
+
+
 def understand(run_dir: Path):
     config = read_json(run_dir / "request.json")
     request = RunRequest.model_validate(config["request"])
@@ -225,7 +391,8 @@ def understand(run_dir: Path):
     pois = {p.id: p for p in request.pois}
     retreat_ids = retreat_candidate_ids(candidates)
     entry_candidates = [c for c in candidates if c["candidateId"] not in retreat_ids and _is_entry(c, pois)]
-    total = sum(len(c["eventDefinitionIds"]) for c in entry_candidates)
+    integrity_pairs = _integrity_pairs(run_dir, request, events)
+    total = sum(len(c["eventDefinitionIds"]) for c in entry_candidates) + len(integrity_pairs)
     # Logical time-range segments give progress granularity and crash recovery;
     # analysis stays in global time so results.jsonl needs no offset merge.
     segments = read_manifest(run_dir).get("segments") or [{"index": 0, "startSec": 0.0, "endSec": float("inf")}]
@@ -239,6 +406,10 @@ def understand(run_dir: Path):
              "counts": {"match": 0, "no_match": 0, "uncertain": 0}, "completed": completed, "currentSegment": 0}
     grouped = candidate_groups(candidates)
     timelines = load_cue_timelines(run_dir) if any(event.cueIds for event in events.values()) else {}
+    # Deterministic integrity warnings stream first: they need no model warm-up
+    # and remain available even when the run has no tracking candidates at all.
+    for zone, index, interval, event, timeline in integrity_pairs:
+        _process_integrity(run_dir, config, request, zone, index, interval, event, state, timeline)
     for segment in segments:
         bucket = [c for c in entry_candidates if segment["startSec"] <= c["triggerSec"] < segment["endSec"]]
         if not bucket:

@@ -1,9 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
-import { useConsoleStore, type CountingLine, type CountingZone, type RoiPointXY } from '../../../store/useConsoleStore'
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
+import { useConsoleStore, type CountingLine, type CountingZone, type IntegrityRegion, type RoiPointXY } from '../../../store/useConsoleStore'
 import { fitContain } from '../../../utils/draw'
 import styles from './EventEditOverlay.module.css'
 
-type Mode = 'line' | 'zone' | 'cue'
+type Mode = 'line' | 'zone' | 'cue' | 'integrity'
+
+export type EventEditOverlayHandle = {
+  /** Commit the open draft (polygon with >=3 vertices); returns true when committed. */
+  finish: () => boolean
+}
 
 function genId(prefix: string) {
   return `${prefix}_${Math.random().toString(36).slice(2, 8)}`
@@ -28,12 +33,12 @@ function displayToSrcNorm(x: number, y: number, rectW: number, rectH: number, sr
   }
 }
 
-export function EventEditOverlay(props: {
+export const EventEditOverlay = forwardRef<EventEditOverlayHandle, {
   anchorRef: React.RefObject<HTMLElement | null>
   enabled: boolean
   mode: Mode
   onClose?: () => void
-}) {
+}>(function EventEditOverlay(props, ref) {
   const eventsConfig = useConsoleStore((s) => s.eventsConfig)
   const setEventsConfig = useConsoleStore((s) => s.setEventsConfig)
   const roiEnabled = useConsoleStore((s) => s.roi.enabled)
@@ -42,7 +47,46 @@ export function EventEditOverlay(props: {
   const [previewLine, setPreviewLine] = useState<{ a: RoiPointXY; b?: RoiPointXY } | null>(null)
   const [zoneDraft, setZoneDraft] = useState<RoiPointXY[]>([])
   const [cueDraft, setCueDraft] = useState<RoiPointXY[]>([])
+  const [integrityDraft, setIntegrityDraft] = useState<RoiPointXY[]>([])
   const [hoverPt, setHoverPt] = useState<RoiPointXY | null>(null)
+
+  // 单一提交入口：起点闭合、双击、工具栏“完成绘制”按钮共用。
+  const commitDraft = useCallback((): boolean => {
+    if (props.mode === 'zone' && zoneDraft.length >= 3) {
+      const newZone: CountingZone = { id: genId('zone'), name: `Z${eventsConfig.zones.length + 1}`, polygon: zoneDraft }
+      setEventsConfig({ zones: [...eventsConfig.zones, newZone] })
+      setZoneDraft([])
+      return true
+    }
+    if (props.mode === 'cue' && cueDraft.length >= 3) {
+      const newCue: CountingZone = { id: genId('cue'), name: `C${(eventsConfig.cues?.length ?? 0) + 1}`, polygon: cueDraft }
+      setEventsConfig({ cues: [...(eventsConfig.cues || []), newCue] })
+      setCueDraft([])
+      return true
+    }
+    if (props.mode === 'integrity' && integrityDraft.length >= 3) {
+      const newZone: IntegrityRegion = { id: genId('integrity'), name: `I${(eventsConfig.integrity?.length ?? 0) + 1}`, polygon: integrityDraft }
+      setEventsConfig({ integrity: [...(eventsConfig.integrity || []), newZone] })
+      setIntegrityDraft([])
+      return true
+    }
+    return false
+  }, [props.mode, zoneDraft, cueDraft, integrityDraft, eventsConfig, setEventsConfig])
+  useImperativeHandle(ref, () => ({ finish: commitDraft }), [commitDraft])
+
+  // Esc 取消当前模式下已绘制但未闭合的草稿，不退出绘制模式。
+  useEffect(() => {
+    if (!props.enabled) return
+    function onKey(e: KeyboardEvent) {
+      if (e.key !== 'Escape') return
+      if (props.mode === 'line') setPreviewLine(null)
+      else if (props.mode === 'zone') setZoneDraft([])
+      else if (props.mode === 'cue') setCueDraft([])
+      else setIntegrityDraft([])
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [props.enabled, props.mode])
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -136,6 +180,21 @@ export function EventEditOverlay(props: {
         ctx.stroke()
       }
 
+      // 完整性检测区（琥珀色，静态监控区域）
+      ctx.strokeStyle = 'rgba(255, 193, 7, 0.65)'
+      ctx.fillStyle = 'rgba(255, 193, 7, 0.08)'
+      for (const z of eventsConfig.integrity || []) {
+        if (z.polygon.length < 3) continue
+        ctx.beginPath()
+        ctx.moveTo(toDx(z.polygon[0]), toDy(z.polygon[0]))
+        for (let i = 1; i < z.polygon.length; i++) {
+          ctx.lineTo(toDx(z.polygon[i]), toDy(z.polygon[i]))
+        }
+        ctx.closePath()
+        ctx.fill()
+        ctx.stroke()
+      }
+
       // 草稿 line
       if (props.mode === 'line' && previewLine?.a) {
         ctx.lineWidth = 3
@@ -198,6 +257,29 @@ export function EventEditOverlay(props: {
           ctx.fill()
         }
       }
+
+      // 草稿 integrity（完整性检测区）
+      if (props.mode === 'integrity' && (integrityDraft.length > 0 || hoverPt)) {
+        ctx.lineWidth = 2
+        ctx.strokeStyle = 'rgba(255, 193, 7, 0.95)'
+        ctx.fillStyle = 'rgba(255, 193, 7, 0.12)'
+        const pts = hoverPt ? [...integrityDraft, hoverPt] : integrityDraft
+        if (pts.length >= 1) {
+          ctx.beginPath()
+          ctx.moveTo(toDx(pts[0]), toDy(pts[0]))
+          for (let i = 1; i < pts.length; i++) ctx.lineTo(toDx(pts[i]), toDy(pts[i]))
+          if (integrityDraft.length >= 3) ctx.closePath()
+          ctx.stroke()
+          if (integrityDraft.length >= 3) ctx.fill()
+        }
+        for (let i = 0; i < integrityDraft.length; i++) {
+          const p = integrityDraft[i]
+          ctx.beginPath()
+          ctx.arc(toDx(p), toDy(p), i === 0 ? 6 : 5, 0, Math.PI * 2)
+          ctx.fillStyle = i === 0 ? 'rgba(255,255,255,0.95)' : 'rgba(255, 193, 7, 0.95)'
+          ctx.fill()
+        }
+      }
     }
 
     draw()
@@ -208,7 +290,7 @@ export function EventEditOverlay(props: {
       ro.disconnect()
       window.removeEventListener('resize', draw)
     }
-  }, [eventsConfig, previewLine, zoneDraft, cueDraft, hoverPt, props.mode, props.anchorRef])
+  }, [eventsConfig, previewLine, zoneDraft, cueDraft, integrityDraft, hoverPt, props.mode, props.anchorRef])
 
   if (!props.enabled) return null
 
@@ -244,69 +326,26 @@ export function EventEditOverlay(props: {
             setEventsConfig({ lines: [...eventsConfig.lines, newLine] })
             setPreviewLine(null)
           }
-        } else if (props.mode === 'cue') {
-          if (cueDraft.length >= 3) {
-            const first = cueDraft[0]
-            const fc = fitContain(rect.width, rect.height, src.w, src.h)
-            const fdx = fc.offX + first.x * src.w * fc.scale
-            const fdy = fc.offY + first.y * src.h * fc.scale
-            const cdx = e.clientX - rect.left
-            const cdy = e.clientY - rect.top
-            if ((fdx - cdx) ** 2 + (fdy - cdy) ** 2 <= 14 * 14) {
-              const newCue: CountingZone = {
-                id: genId('cue'),
-                name: `C${(eventsConfig.cues?.length ?? 0) + 1}`,
-                polygon: cueDraft,
-              }
-              setEventsConfig({ cues: [...(eventsConfig.cues || []), newCue] })
-              setCueDraft([])
-              return
-            }
-          }
-          setCueDraft([...cueDraft, p])
         } else {
-          // zone
-          if (zoneDraft.length >= 3) {
-            const first = zoneDraft[0]
+          // zone / cue / integrity 共用多边形草稿逻辑
+          const draft = props.mode === 'cue' ? cueDraft : props.mode === 'integrity' ? integrityDraft : zoneDraft
+          const setDraft = props.mode === 'cue' ? setCueDraft : props.mode === 'integrity' ? setIntegrityDraft : setZoneDraft
+          if (draft.length >= 3) {
+            const first = draft[0]
             const fc = fitContain(rect.width, rect.height, src.w, src.h)
             const fdx = fc.offX + first.x * src.w * fc.scale
             const fdy = fc.offY + first.y * src.h * fc.scale
             const cdx = e.clientX - rect.left
             const cdy = e.clientY - rect.top
             if ((fdx - cdx) ** 2 + (fdy - cdy) ** 2 <= 14 * 14) {
-              const newZone: CountingZone = {
-                id: genId('zone'),
-                name: `Z${eventsConfig.zones.length + 1}`,
-                polygon: zoneDraft,
-              }
-              setEventsConfig({ zones: [...eventsConfig.zones, newZone] })
-              setZoneDraft([])
+              commitDraft()
               return
             }
           }
-          setZoneDraft([...zoneDraft, p])
+          setDraft([...draft, p])
         }
       }}
-      onDoubleClick={() => {
-        if (props.mode === 'zone' && zoneDraft.length >= 3) {
-          const newZone: CountingZone = {
-            id: genId('zone'),
-            name: `Z${eventsConfig.zones.length + 1}`,
-            polygon: zoneDraft,
-          }
-          setEventsConfig({ zones: [...eventsConfig.zones, newZone] })
-          setZoneDraft([])
-        }
-        if (props.mode === 'cue' && cueDraft.length >= 3) {
-          const newCue: CountingZone = {
-            id: genId('cue'),
-            name: `C${(eventsConfig.cues?.length ?? 0) + 1}`,
-            polygon: cueDraft,
-          }
-          setEventsConfig({ cues: [...(eventsConfig.cues || []), newCue] })
-          setCueDraft([])
-        }
-      }}
+      onDoubleClick={() => { commitDraft() }}
     />
   )
-}
+})

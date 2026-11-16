@@ -1,19 +1,26 @@
 import type { VlmEventDefinition } from './vlm'
 
-export const triggerKinds = ['line.cross', 'zone.enter', 'zone.leave', 'initial_inside'] as const
+export const triggerKinds = ['line.cross', 'zone.enter', 'zone.leave', 'initial_inside', 'integrity.change'] as const
 export type EventRule = Required<VlmEventDefinition> & { name: string; version: number; createdAt?: number; updatedAt?: number }
 export type RuleLibrary = { revision: number; rules: EventRule[] }
-export type RuleSelection = { id: string; version: number; poiIds: string[]; cueIds: string[] }
+export type RuleSelection = { id: string; version: number; poiIds: string[]; cueIds: string[]; integrityIds: string[] }
 export type RuleSnapshot = { libraryRevision: number | null; rules: { id: string; name: string; version: number | null; event: VlmEventDefinition }[] }
 export type RulePoi = { id: string; label: string; kind: string }
 export const newRuleId = () => `event_${crypto.randomUUID().replaceAll('-', '')}`
+
+// System-managed preset: auto-bound to every drawn integrity zone by the backend;
+// the editor shows it locked and never treats the synthesized row as dirty.
+export const PRESET_RULE_ID = 'preset_integrity'
+export function presetRule(): EventRule {
+  return { id: PRESET_RULE_ID, name: '完整性检测（预设）', description: '完整性检测区是否出现持续性画面改变（围墙、门体等静态设施被改动）', enabled: true, poiIds: [], cueIds: [], integrityIds: [], triggerKinds: ['integrity.change'], preSeconds: 4, postSeconds: 6, criteria: [], uncertainWhen: [], version: 0 }
+}
 export function newRule(description = ''): EventRule {
-  return { id: newRuleId(), name: description.slice(0, 160), description, enabled: true, poiIds: [], cueIds: [], triggerKinds: ['line.cross', 'zone.enter', 'zone.leave'], preSeconds: 4, postSeconds: 6, criteria: [], uncertainWhen: [], version: 0 }
+  return { id: newRuleId(), name: description.slice(0, 160), description, enabled: true, poiIds: [], cueIds: [], integrityIds: [], triggerKinds: ['line.cross', 'zone.enter', 'zone.leave'], preSeconds: 4, postSeconds: 6, criteria: [], uncertainWhen: [], version: 0 }
 }
 export function rulePayload(rule: EventRule) {
-  return { id: rule.id, name: rule.name.trim(), description: rule.description.trim(), enabled: rule.enabled, poiIds: [], cueIds: [], triggerKinds: rule.triggerKinds, preSeconds: rule.preSeconds, postSeconds: rule.postSeconds, criteria: rule.criteria, uncertainWhen: rule.uncertainWhen }
+  return { id: rule.id, name: rule.name.trim(), description: rule.description.trim(), enabled: rule.enabled, poiIds: [], cueIds: [], integrityIds: [], triggerKinds: rule.triggerKinds, preSeconds: rule.preSeconds, postSeconds: rule.postSeconds, criteria: rule.criteria, uncertainWhen: rule.uncertainWhen }
 }
-export const ruleChanged = (rule: EventRule, saved?: EventRule) => !saved || JSON.stringify(rulePayload(rule)) !== JSON.stringify(rulePayload(saved))
+export const ruleChanged = (rule: EventRule, saved?: EventRule) => (!saved && rule.id === PRESET_RULE_ID) ? false : !saved || JSON.stringify(rulePayload(rule)) !== JSON.stringify(rulePayload(saved))
 export function ruleError(rule: EventRule): string {
   if (!rule.name.trim() || rule.name.length > 160) return '名称不能为空，最多 160 字 / Name: 1–160 characters'
   if (!rule.description.trim() || rule.description.length > 1500) return '事件描述不能为空，最多 1500 字 / Description: 1–1500 characters'
@@ -22,10 +29,12 @@ export function ruleError(rule: EventRule): string {
   if ([rule.criteria, rule.uncertainWhen].some(list => list.length > 10 || list.some(s => !s.trim() || s.length > 500))) return '高级条件最多 10 条，每条 1–500 字 / Invalid conditions'
   return ''
 }
-export function bindingError(rule: EventRule, ids: string[], pois: RulePoi[]) {
+export function bindingError(rule: EventRule, ids: string[], pois: RulePoi[], integrity: RulePoi[] = []) {
   if (ids.some(id => !pois.some(p => p.id === id))) return 'POI 绑定已失效，请重新选择 / Missing POI binding'
   const targets = pois.filter(p => !ids.length || ids.includes(p.id))
-  if (!targets.some(p => rule.triggerKinds.some(t => p.kind === 'line' ? t === 'line.cross' : t !== 'line.cross'))) return '没有匹配触发类型的 POI / No compatible POI'
+  const poiOk = targets.some(p => rule.triggerKinds.some(t => p.kind === 'line' ? t === 'line.cross' : t === 'zone.enter' || t === 'zone.leave' || t === 'initial_inside'))
+  const integrityOk = rule.triggerKinds.includes('integrity.change') && integrity.length > 0
+  if (!poiOk && !integrityOk) return '没有匹配触发类型的 POI / No compatible POI'
   return ''
 }
 export function parseRuleImport(text: string): EventRule[] {
@@ -46,7 +55,7 @@ export function parseRuleImport(text: string): EventRule[] {
     }
     if (!/^[A-Za-z0-9_-]{1,80}$/.test(rule.id) || ids.has(rule.id)) throw new Error(`Invalid or duplicate ID: ${rule.id}`)
     ids.add(rule.id)
-    for (const key of ['criteria', 'uncertainWhen', 'triggerKinds', 'poiIds', 'cueIds'] as const) {
+    for (const key of ['criteria', 'uncertainWhen', 'triggerKinds', 'poiIds', 'cueIds', 'integrityIds'] as const) {
       if (item[key] !== undefined) {
         if (!Array.isArray(item[key]) || item[key].some(s => typeof s !== 'string')) throw new Error(`Invalid ${key}`)
         rule[key] = item[key] as string[]

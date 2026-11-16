@@ -5,7 +5,6 @@ export type OSDFlags = {
   masks: boolean
   keypoints: boolean
   labels: boolean
-  heatmap: boolean
 }
 
 export type Params = { conf: number; iou: number; classFilter: string[]; track: boolean }
@@ -49,7 +48,13 @@ export type SignalRegion = {
   minOnRatio?: number; minR?: number; minRG?: number; minRB?: number
   minOnSec?: number; minOffSec?: number; sampleFps?: number
 }
-export type EventsConfig = { lines: CountingLine[]; zones: CountingZone[]; cues?: SignalRegion[]; classes?: string[] }
+export type IntegrityRegion = {
+  id: string; name?: string; polygon: RoiPointXY[]
+  sampleFps?: number; baselineFrames?: number; pixelThreshold?: number; changeRatio?: number
+  confirmSec?: number; edgeWeight?: number; minBlobRatio?: number; alignTolerance?: number
+  ignoreDetections?: boolean; vlmReview?: boolean
+}
+export type EventsConfig = { lines: CountingLine[]; zones: CountingZone[]; cues?: SignalRegion[]; integrity?: IntegrityRegion[]; classes?: string[] }
 export type EventEntry = {
   source?: 'video'
   mediaTime?: number
