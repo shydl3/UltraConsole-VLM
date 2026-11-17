@@ -22,7 +22,8 @@ def prompt(candidate: dict, event: EventDefinition, manifest: dict, *, retry: bo
         cue_note = "\n确定性检测：门框红灯状态=" + str(state)
         if onset is not None:
             cue_note += f"，亮起起始约 {onset:.1f}s"
-        cue_note += "。请结合画面复核该线索，不要仅凭此提示下结论。"
+        cue_note += ("。该状态为像素级确定性检测，直接作为红灯条件的 yes/no 证据（on=yes、off=no），"
+                     "不得因目标遮挡或画面模糊将其改判 unknown；仅当信号区本身在画面中不可见且无确定性状态时才写 unknown。")
     return (
         "你是视频事件核验助手。只判断粉红框标记 TARGET 的那个人，其他框只是旁人。"
         "粉红或红色TARGET框、绿色旁人框、黄色POI线和文字均为人工叠加标注，不是现场物体或灯光；"
@@ -35,7 +36,9 @@ def prompt(candidate: dict, event: EventDefinition, manifest: dict, *, retry: bo
         f"不确定条件：{json.dumps(event.uncertainWhen, ensure_ascii=False)}\n"
         f"辅助数据：{json.dumps(context, ensure_ascii=False, separators=(',', ':'))}\n"
         "默认否认：只有在画面中清晰看到某必要条件所需的现象时才认定其发生；看不到即视为未满足，不得据事件描述推断已发生。"
-        "对门框红灯等固定位置的线索：若采样已完整覆盖所需窗口仍未见其亮起，作为no的证据；仅当目标或线索被遮挡、或落在窗口之外无法观察时才写unknown。"
+        "目标进入计数区/门框后被遮挡或轨迹丢失属正常现象：不得因目标遮挡、消失或身份跟踪失败把任何条件写 unknown；"
+        "退回类条件以是否观察到退回为准，未观察到退回即视为未退回。"
+        "对门框红灯等固定位置的线索：若采样已完整覆盖所需窗口仍未见其亮起，作为no的证据；仅当信号区本身被遮挡不可见、或落在窗口之外无法观察时才写unknown。"
         "红灯亮起等时刻以画面实际可见为准，不能用触发POI的时间(triggerSec)代替其起始时间。"
         "涉及先后顺序或持续时间时，说明实际可见的起止与观察是否覆盖所需窗口；不能编造时间、时长、遮挡期间或窗口外的动作。"
         "confidence 是对本次三态判断的自报把握程度，不是违规发生概率。\n"

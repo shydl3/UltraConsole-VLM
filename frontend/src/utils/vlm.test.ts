@@ -76,10 +76,11 @@ describe('VLM task progress', () => {
   it('merges local submissions with server runs without dropping finished tasks', () => {
     const uploadTask = { key: 'upload-1', name: 'a.mp4', upload: { uploaded: 1, total: 2 } }
     const runTask = { key: 'run-1', name: 'b.mp4', runId: 'run-1' }
-    const active = { runId: 'run-1', videoId: 'v2', fileName: 'b.mp4', state: 'tracking' }
+    const active = { runId: 'run-1', videoId: 'v2', fileName: 'b.mp4', displayName: 'b.mp4_20261117_1105', state: 'tracking' }
     const terminal = { runId: 'run-1', videoId: 'v2', fileName: 'b.mp4', state: 'completed' }
     const merged = mergeVlmTasks([uploadTask, runTask], [active, { runId: 'other', videoId: 'v3', fileName: 'c.mp4', state: 'queued' }])
     expect(merged.map(task => task.key)).toEqual(['upload-1', 'run-1', 'other'])
+    expect(merged[1].name).toBe('b.mp4_20261117_1105')
     expect(merged[1].run?.state).toBe('tracking')
     // A run missing from the poll keeps the last known state instead of vanishing.
     const kept = mergeVlmTasks([{ ...runTask, run: terminal }], [])

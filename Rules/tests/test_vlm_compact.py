@@ -175,3 +175,89 @@ def test_worker_compact_flow_preserves_poi_seek_metadata(tmp_path, monkeypatch, 
         assert "后半段被旁人遮挡" in result["videoDescription"]
         assert result["segments"][0]["evidence"] == []
         assert read_json(tmp_path / "summary.json")["decisions"]["match"] == 1
+
+
+def _cue_run(tmp_path, intervals, with_observations=False):
+    from ultra_rules.vlm import qwen_worker
+    request = RunRequest(videoId="v", pois=[{"id": "p", "kind": "line", "points": [[0, 0], [1, 1]]}],
+                         cues=[{"id": "red", "points": [[.4, .2], [.6, .2], [.6, .8], [.4, .8]]}],
+                         events=[{"id": "e", "description": "test", "criteria": ["a"], "cueIds": ["red"],
+                                  "preSeconds": 4, "postSeconds": 30}])
+    write_json(tmp_path / "request.json", {"request": request.model_dump(), "modelPath": "fake",
+                                          "video": {"durationSec": 40, "sha256": "fake"}})
+    candidate = {"candidateId": "c", "trackId": 32, "trackSegmentId": "32-1", "poiId": "p",
+                 "triggerKind": "line.cross", "direction": "negative_to_positive", "triggerSec": 12.8,
+                 "confirmedSec": 13.0, "eventDefinitionIds": ["e"]}
+    (tmp_path / "candidates.jsonl").write_text(json.dumps(candidate) + "\n", encoding="utf-8")
+    write_json(tmp_path / "cues.json", {"cues": {"red": {"intervals": intervals}}})
+    if with_observations:
+        import sqlite3
+        db = sqlite3.connect(tmp_path / "observations.sqlite")
+        db.execute("CREATE TABLE observations (frame_index INTEGER PRIMARY KEY, time REAL NOT NULL, body TEXT NOT NULL)")
+        db.commit()
+        db.close()
+    return qwen_worker
+
+
+def _fake_model(monkeypatch, qwen_worker, calls):
+    class FakeQwen:
+        runtime = {}
+        torch = SimpleNamespace(cuda=SimpleNamespace(empty_cache=lambda: None))
+
+        def __init__(self, _path):
+            pass
+
+        def infer(self, _frames, _metadata, _question, _max_tokens):
+            calls.append(_question)
+            return json.dumps({**core(), "videoDescription": "目标经过门框，红灯亮起后继续通行。",
+                               "conditions": [{"index": 0, "value": "yes", "evidenceTimeSec": 31.0}]}), \
+                {"generationTruncated": False}
+
+    def build_sample(_dir, _config, _request, _candidate, start, end, _sample_id):
+        return None, {}, {"window": {"startSec": start, "endSec": end}, "observations": [],
+                          "sampleTimesSeconds": [], "sourceFrameIndices": [],
+                          "quality": {"targetVisibleFraction": .3, "uniqueFrameCount": 17, "medianTargetHeightPx": 90}}
+
+    monkeypatch.setattr(qwen_worker, "Qwen", FakeQwen)
+    monkeypatch.setattr(qwen_worker, "build_sample", build_sample)
+
+
+def test_worker_per_window_cue_gate_skips_model_on_off_segments(tmp_path, monkeypatch):
+    # dryRun previews still walk the segment loop: off windows must stay no_match
+    # instead of the generic dry-run uncertain, on windows keep the preview mark.
+    qwen_worker = _cue_run(tmp_path, [[30.0, 32.0]], with_observations=True)
+    config = read_json(tmp_path / "request.json")
+    config["request"]["dryRun"] = True
+    write_json(tmp_path / "request.json", config)
+    calls = []
+    _fake_model(monkeypatch, qwen_worker, calls)
+    qwen_worker.understand(tmp_path)
+    result = list(iter_jsonl(tmp_path / "results.jsonl"))[0]
+    # Windows (8.8,24.8) / (22.8,38.8) / (36.8,40): only the middle one sees the cue.
+    assert [s["decision"] for s in result["segments"]] == ["no_match", "uncertain", "no_match"]
+    assert calls == []
+    assert "信号区未亮起" in result["segments"][0]["reason"]
+    assert result["inferenceStatus"] == "dry_run"
+
+
+def test_worker_all_off_window_is_deterministic_no_match_without_model(tmp_path, monkeypatch):
+    qwen_worker = _cue_run(tmp_path, [])
+    calls = []
+    _fake_model(monkeypatch, qwen_worker, calls)
+    qwen_worker.understand(tmp_path)
+    result = list(iter_jsonl(tmp_path / "results.jsonl"))[0]
+    assert calls == []
+    assert result["decision"] == "no_match"
+    assert result["inferenceStatus"] == "deterministic"
+    assert result["cueEvidence"]["state"] == "off"
+
+
+def test_worker_tracking_gap_is_advisory_match(tmp_path, monkeypatch):
+    qwen_worker = _cue_run(tmp_path, [[0.8, 60.0]], with_observations=True)
+    calls = []
+    _fake_model(monkeypatch, qwen_worker, calls)
+    qwen_worker.understand(tmp_path)
+    result = list(iter_jsonl(tmp_path / "results.jsonl"))[0]
+    assert calls == []
+    assert result["decision"] == "match"
+    assert result["qualityWarnings"] == ["tracking_gap"]

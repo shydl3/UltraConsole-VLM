@@ -67,6 +67,15 @@ def status(run_dir: Path):
             write_json(run_dir / "status.json", result)
     if (run_dir / "progress.json").exists():
         result["progress"] = read_json(run_dir / "progress.json")
+    # User-facing task name: original video name + minute-precision timestamp.
+    # The uuid run id stays internal (directory / API path), never displayed.
+    library = run_dir / "library.json"
+    if library.exists():
+        result["displayName"] = read_json(library).get("displayName") or result.get("fileName")
+    else:
+        started = result.get("startedAt")
+        base = result.get("fileName") or run_dir.name
+        result["displayName"] = f"{base}_{time.strftime('%Y%m%d_%H%M', time.localtime(started))}" if started else base
     if cancelled and result["state"] not in TERMINAL:
         result["state"] = "cancelling"
     return result

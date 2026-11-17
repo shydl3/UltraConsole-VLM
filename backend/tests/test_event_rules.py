@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import replace
 
 import app.main as main
@@ -75,6 +76,8 @@ def test_run_uses_backend_definition_and_keeps_snapshot_after_edit_delete(client
     response = client.post('/api/vlm/runs/from-rules', json=start_payload(library))
     assert response.status_code == 200, response.text
     rid = response.json()['runId']
+    # Task display name keeps the original video name plus a minute-precision stamp.
+    assert re.match(r'clip\.mp4_\d{8}_\d{4}$', client.get(f'/api/vlm/runs/{rid}').json()['displayName'])
     snapshot = client.get(f'/api/vlm/runs/{rid}/rules').json()
     assert snapshot['rules'][0]['version'] == 1
     assert snapshot['rules'][0]['event']['poiIds'] == ['gate']
@@ -112,6 +115,27 @@ def test_cue_binding_flows_to_run_and_unknown_cue_rejected(client, monkeypatch):
     payload = start_payload(library)
     payload['selections'][0]['cueIds'] = ['missing']
     assert client.post('/api/vlm/runs/from-rules', json=payload).status_code == 422
+
+
+def test_empty_cue_binding_expands_to_all_run_cues(client, monkeypatch):
+    library = save(client, [rule()]).json()
+    folder = api.DATA_ROOT / 'uploads/clip'
+    folder.mkdir(parents=True)
+    jobs.write_json(folder / 'video.json', {'fileName': 'clip.mp4', 'sourceName': 'source.mp4', 'sha256': 'abc'})
+    (folder / 'source.mp4').write_bytes(b'test')
+
+    def launch(run_dir, _python):
+        status = jobs.read_json(run_dir / 'status.json')
+        jobs.write_json(run_dir / 'status.json', {**status, 'state': 'completed'})
+    monkeypatch.setattr(jobs, 'launch', launch)
+    payload = start_payload(library)
+    payload['cues'] = [{'id': 'red', 'points': [[.2, .2], [.8, .2], [.8, .8]]},
+                       {'id': 'red2', 'points': [[.1, .1], [.9, .1], [.9, .9]]}]
+    payload['selections'][0]['cueIds'] = []
+    response = client.post('/api/vlm/runs/from-rules', json=payload)
+    assert response.status_code == 200, response.text
+    request = jobs.read_json(api.DATA_ROOT / f'runs/{response.json()["runId"]}/request.json')['request']
+    assert request['events'][0]['cueIds'] == ['red', 'red2']
 
 
 def test_old_rule_without_cueids_still_resolves(client, monkeypatch):

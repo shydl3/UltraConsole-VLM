@@ -88,7 +88,7 @@ export function useReviewData(target: ReviewTarget, filter: ReviewFilter, offset
         if (!alive) return
         setData(previous => ({
           ...previous, run, snapshot: rules, items: page.items, total: page.total,
-          facets: page.facets, markers: page.markers, name: providedName || run.fileName || id,
+          facets: page.facets, markers: page.markers, name: providedName || run.displayName || run.fileName || id,
           loading: false, error: '',
         }))
         // Background tabs do not need 2.5s polling; keep just enough to stay in sync.

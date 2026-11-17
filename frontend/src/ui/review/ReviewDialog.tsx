@@ -148,7 +148,7 @@ export function ReviewDialog({ target, onClose, standalone = false }: {
         <div className={styles.headingRow}>
           <h2 ref={headingRef} id="review-title" tabIndex={-1}>{data.name || t('review.title')}</h2>
           {data.run && <span className={styles.stateChip}>{t(`vlm.${data.run.state}`)}</span>}
-          <span className={styles.muted}>{target.kind === 'vlm' ? t('library.vlm') : t('library.video')} · {target.id.slice(-12)}</span>
+          <span className={styles.muted}>{target.kind === 'vlm' ? t('library.vlm') : t('library.video')}</span>
         </div>
         <div className={styles.actions}>
           {isRun && <span className={styles.muted}>{t('review.count', { count: data.total })}</span>}

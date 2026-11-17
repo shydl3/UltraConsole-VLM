@@ -58,3 +58,12 @@ def test_prompt_retry_demands_complete_conditions():
 def test_prompt_includes_cue_note_when_provided():
     text = prompt(candidate(), event(), manifest(), cue_evidence={"state": "off", "onsetSec": None})
     assert "门框红灯状态=off" in text
+    assert "直接作为红灯条件的 yes/no 证据" in text
+
+
+def test_prompt_treats_occlusion_as_normal_and_forbids_unknown_from_tracking_loss():
+    text = prompt(candidate(), event(), manifest())
+    assert "被遮挡或轨迹丢失属正常现象" in text
+    assert "不得因目标遮挡、消失或身份跟踪失败把任何条件写 unknown" in text
+    assert "未观察到退回即视为未退回" in text
+    assert "仅当信号区本身被遮挡不可见" in text

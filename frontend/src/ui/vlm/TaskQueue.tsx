@@ -127,7 +127,7 @@ export function TaskQueue({ submissions, version, selectedRunId, onBusyChange, o
     {target && <ConfirmDialog title={t('vlm.confirmCancelTitle')} confirmLabel={t('vlm.cancelConfirm')}
       cancelLabel={t('vlm.cancelKeep')} danger busy={cancelling} onConfirm={() => void cancel()} onClose={() => setTarget(null)}>
       <p>{t('vlm.confirmCancelBody')}</p>
-      <p className={styles.confirmName}>{target.fileName || target.runId}</p>
+      <p className={styles.confirmName}>{target.displayName || target.fileName || target.runId}</p>
     </ConfirmDialog>}
   </section>
 }

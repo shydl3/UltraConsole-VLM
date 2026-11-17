@@ -11,7 +11,7 @@ export type VlmProgress = {
   currentSegment?: number; segmentCount?: number; zoneCount?: number; integrityFraction?: number
 }
 export type VlmRun = {
-  runId: string; videoId: string; fileName?: string; state: string; error?: string
+  runId: string; videoId: string; fileName?: string; displayName?: string; state: string; error?: string
   progress?: VlmProgress
   summary?: { resultCount: number; reason?: string; dryRun?: boolean; failedRequests?: number }
   parameters?: VlmParameters
@@ -83,10 +83,10 @@ export function mergeVlmTasks(local: VlmTask[], runs: VlmRun[]): VlmTask[] {
   const merged = local.map(task => {
     const run = task.runId ? byRun.get(task.runId) : undefined
     if (run) seen.add(run.runId)
-    return { ...task, name: run?.fileName || task.name, run: run ?? task.run }
+    return { ...task, name: run?.displayName || run?.fileName || task.name, run: run ?? task.run }
   })
   for (const run of runs) {
-    if (!seen.has(run.runId)) merged.push({ key: run.runId, name: run.fileName || run.runId, runId: run.runId, run })
+    if (!seen.has(run.runId)) merged.push({ key: run.runId, name: run.displayName || run.fileName || run.runId, runId: run.runId, run })
   }
   return merged
 }

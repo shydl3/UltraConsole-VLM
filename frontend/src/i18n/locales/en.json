@@ -144,6 +144,8 @@
     "quality.missing_evidence_time": "A condition lacked an evidence time; downgraded to unknown",
     "quality.integrity_vlm_review_failed": "Integrity VLM review failed; the deterministic warning is kept",
     "quality.integrity_evidence_missing": "Integrity evidence images missing; VLM review skipped",
+    "quality.tracking_gap": "Tracking gap from occlusion (advisory, does not affect the verdict)",
+    "quality.cue_override_red_off": "Deterministic signal-ROI detection stayed off; overrides the model verdict",
     "queued": "Queued",
     "tracking": "Tracking / POI detection",
     "cues": "Cue detection",

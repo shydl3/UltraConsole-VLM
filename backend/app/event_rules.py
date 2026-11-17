@@ -170,7 +170,9 @@ def resolve(root: Path, request: ManagedRun):
                 raise HTTPException(409, f"Rule changed, disabled or deleted: {selection.id}")
             event = {key: row[key] for key in EventDefinition.model_fields if key in row}
             event["poiIds"] = selection.poiIds
-            event["cueIds"] = selection.cueIds
+            # Empty cue binding means "all applicable signal ROIs" in the editor;
+            # expand it so the deterministic cue gate actually runs.
+            event["cueIds"] = selection.cueIds or [cue.id for cue in request.cues]
             event["integrityIds"] = selection.integrityIds
             applicable = [poi for poi in request.pois if not selection.poiIds or poi.id in selection.poiIds]
             poi_ok = any(set(event["triggerKinds"]) & ({"line.cross"} if poi.kind == "line" else {"zone.enter", "zone.leave", "initial_inside"}) for poi in applicable)

@@ -200,7 +200,7 @@ export function VlmPanel({ file, eventsConfig, basicRunning, onBusyChange }: {
     <div className={styles.toolbar}>
       <label>{t('vlm.history')} <select value={runId} onChange={e => {
         setRunId(e.target.value); setSnapshot(null); setRun(null); setError('')
-      }}><option value="">—</option>{runs.map(item => <option key={item.runId} value={item.runId}>{item.fileName || item.runId} · {t(`vlm.${item.state}`)} · {item.runId.slice(-6)}</option>)}</select></label>
+      }}><option value="">—</option>{runs.map(item => <option key={item.runId} value={item.runId}>{item.displayName || item.fileName || item.runId} · {t(`vlm.${item.state}`)}</option>)}</select></label>
     </div>
     {run && <div role="status">
       {t(`vlm.${run.state}`)} · {run.progress?.sampledFrames ?? 0} {t('vlm.frames')} · {run.progress?.candidateCount ?? 0} {t('vlm.candidates')} · {run.progress?.completedRequests ?? 0}/{run.progress?.totalRequests ?? 0} {t('vlm.judgments')}

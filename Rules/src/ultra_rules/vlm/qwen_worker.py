@@ -4,7 +4,7 @@ import time
 from pathlib import Path
 
 from .contracts import RunRequest
-from .decision import candidate_groups, evaluate, load_cue_timelines, retreat_candidate_ids
+from .decision import candidate_groups, cue_state_in_window, evaluate, load_cue_timelines, retreat_candidate_ids
 from .prompting import PROMPT_VERSION, integrity_prompt, prompt
 from .results import aggregate_result, apply_answer, complete_json_answer, decision_from_conditions, parse_answer
 from .sampling import build_sample, windows
@@ -89,8 +89,8 @@ def _is_entry(candidate, pois):
 def _cue_veto(part, deterministic):
     if not deterministic:
         return
-    if deterministic["cueEvidence"].get("state") == "off" and part.get("decision") == "match":
-        part.update(decision="no_match", modelDecision=part.get("modelDecision", "match"))
+    if deterministic["cueEvidence"].get("state") == "off" and part.get("decision") in ("match", "uncertain"):
+        part.update(decision="no_match", modelDecision=part.get("modelDecision", part.get("decision")))
         part["qualityWarnings"] = list(dict.fromkeys(part.get("qualityWarnings", []) + ["cue_override_red_off"]))
         part["reason"] = "确定性检测显示门框红灯未亮起，覆盖模型判断。"
 
@@ -136,6 +136,8 @@ def _process_candidate(run_dir, config, request, candidate, events, state, group
                               cueEvidence=deterministic["cueEvidence"],
                               decision=deterministic["decision"], reason=deterministic["reason"],
                               modelDecision=deterministic["decision"], inferenceStatus="deterministic")
+                if deterministic.get("trackingGap"):
+                    output["qualityWarnings"] = ["tracking_gap"]
                 if output["segments"]:
                     sel = output["segments"][0]
                     for key in ("window", "quality", "previewPath", "sampleManifest"):
@@ -152,6 +154,14 @@ def _process_candidate(run_dir, config, request, candidate, events, state, group
                     part = {"window": manifest["window"], "quality": quality,
                             "sampleManifest": f"samples/{sample_id}.json", "previewPath": f"previews/{sample_id}.jpg"}
                     output["segments"].append(part)
+                    # Per-window deterministic gate: a segment whose signal ROI never
+                    # lit is no_match without asking the model, so occlusion-driven
+                    # model uncertainty can never survive an all-off window.
+                    if event.cueIds and cue_state_in_window(timelines, event.cueIds, start, end)[0] == "off":
+                        part.update(decision="no_match", reason="该检测窗口内信号区未亮起，确定性门禁判不匹配",
+                                    modelDecisionConfidence=None, qualityWarnings=[])
+                        del frames
+                        continue
                     if request.dryRun:
                         part.update(decision="uncertain", reason="仅抽帧预览，未调用模型", modelDecisionConfidence=None, downgradeReasons=[])
                     else:

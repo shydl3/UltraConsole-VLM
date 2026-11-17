@@ -144,6 +144,8 @@
     "quality.missing_evidence_time": "某条件缺少证据时间，已降级为无法确认",
     "quality.integrity_vlm_review_failed": "完整性 VLM 复核失败，保留确定性检测警告",
     "quality.integrity_evidence_missing": "完整性证据图缺失，跳过 VLM 复核",
+    "quality.tracking_gap": "目标因遮挡跟踪缺失（辅助信息，不影响判定）",
+    "quality.cue_override_red_off": "确定性信号区检测未亮起，覆盖模型判断",
     "queued": "排队中",
     "tracking": "姿态跟踪与 POI 检测",
     "cues": "信号区检测",

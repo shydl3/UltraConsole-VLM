@@ -3,7 +3,7 @@ import sqlite3
 from pathlib import Path
 
 from ultra_rules.vlm.contracts import RunRequest
-from ultra_rules.vlm.decision import evaluate, red_state, retreat_candidate_ids
+from ultra_rules.vlm.decision import cue_state_in_window, evaluate, red_state, retreat_candidate_ids
 from ultra_rules.vlm.storage import write_json
 
 
@@ -90,5 +90,16 @@ def test_evaluate_red_on_tracking_missing(tmp_path):
     write_observations(tmp_path, "1-1", [0.0, 0.5, 1.0, 1.5, 2.0])
     entry = candidate("c1", 1.0, direction="negative_to_positive")
     result = evaluate(entry, request().events[0], request(), tmp_path, [entry])
-    assert result["decision"] == "uncertain"
-    assert result["reviewRequired"] is True
+    # Occlusion after entry is normal: advisory warning, never uncertain.
+    assert result["decision"] == "match"
+    assert result["reviewRequired"] is False
+    assert result["trackingGap"] is True
+
+
+def test_cue_state_in_window_per_segment():
+    timelines = {"red": {"intervals": [[30.0, 32.0]]}}
+    assert cue_state_in_window(timelines, ["red"], 8.8, 24.8) == ("off", None)
+    assert cue_state_in_window(timelines, ["red"], 22.8, 38.8) == ("on", 30.0)
+    assert cue_state_in_window(timelines, ["red"], 36.8, 42.8) == ("off", None)
+    assert cue_state_in_window({}, ["red"], 0, 10) == ("unknown", None)
+    assert cue_state_in_window(timelines, [], 0, 10) == ("off", None)

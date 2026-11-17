@@ -122,7 +122,7 @@ export function LibraryPage() {
             </tr></thead>
             <tbody>{list?.items.map(item => <tr key={libraryKey(item)}>
               <td><input type="checkbox" aria-label={`${t('library.select')} ${item.name}`} disabled={item.active || loading} checked={checked.has(libraryKey(item))} onChange={e => select(item, e.target.checked)} /></td>
-              <td><button className={styles.name} onClick={() => openItem(item)}>{item.name}</button><span className={styles.subline}>{t(`library.${item.kind}`)} · {item.id.slice(-12)}</span></td>
+              <td><button className={styles.name} onClick={() => openItem(item)}>{item.name}</button><span className={styles.subline}>{t(`library.${item.kind}`)}</span></td>
               <td><span className={item.active ? styles.running : styles.badge}>{['ready', 'running', 'unknown'].includes(item.state) ? t(`library.${item.state}`) : t(`vlm.${item.state}`)}</span></td>
               <td className={styles.date}>{new Date(item.createdAt * 1000).toLocaleString()}</td>
               <td className={styles.date}>{formatDuration(item.durationSec, t)}{item.active && item.durationSec != null ? ` · ${t('library.inProgress')}` : ''}</td>

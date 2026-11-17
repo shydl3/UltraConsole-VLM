@@ -59,8 +59,8 @@ def load_cue_timelines(run_dir: Path) -> dict:
     return read_json(path).get("cues", {})
 
 
-def red_state(timelines: dict, cue_ids: list[str], entry_t: float, pre: float, post: float):
-    """Return (state, onset) where state is 'on'/'off'/'unknown'."""
+def cue_state_in_window(timelines: dict, cue_ids: list[str], start: float, end: float, anchor: float | None = None):
+    """Return (state, onset) for an explicit [start, end] window; 'on'/'off'/'unknown'."""
     if not cue_ids:
         return "off", None
     intervals: list[list[float]] = []
@@ -68,13 +68,17 @@ def red_state(timelines: dict, cue_ids: list[str], entry_t: float, pre: float, p
         if cid not in timelines:
             return "unknown", None
         intervals.extend(timelines[cid].get("intervals", []))
-    window_lo = entry_t - pre
-    window_hi = entry_t + post
-    hits = [iv for iv in intervals if iv[1] >= window_lo and iv[0] <= window_hi]
+    hits = [iv for iv in intervals if iv[1] >= start and iv[0] <= end]
     if not hits:
         return "off", None
-    best = min(hits, key=lambda iv: abs(iv[0] - entry_t))
+    pivot = start if anchor is None else anchor
+    best = min(hits, key=lambda iv: abs(iv[0] - pivot))
     return "on", best[0]
+
+
+def red_state(timelines: dict, cue_ids: list[str], entry_t: float, pre: float, post: float):
+    """Return (state, onset) where state is 'on'/'off'/'unknown'."""
+    return cue_state_in_window(timelines, cue_ids, entry_t - pre, entry_t + post, anchor=entry_t)
 
 
 def _retreated(candidate: dict, grouped: dict[tuple, list[dict]], start: float, end: float) -> bool:
@@ -135,7 +139,9 @@ def evaluate(candidate: dict, event: EventDefinition, request: RunRequest, run_d
         return {"decision": "no_match", "reason": "红灯亮起后 5 秒内目标退回原区域",
                 "cueEvidence": cue_evidence, "reviewRequired": False}
     if not _tracked_through(run_dir, candidate, entry_t, window_end, request.maxGapSeconds):
-        return {"decision": "uncertain", "reason": "5 秒窗口内目标跟踪缺失，无法确认是否退回",
-                "cueEvidence": cue_evidence, "reviewRequired": True}
+        # Occlusion after entry is normal: a tracking gap never downgrades the
+        # verdict to uncertain; it is recorded as an advisory warning only.
+        return {"decision": "match", "reason": "门框红灯亮起且未观察到退回；目标因遮挡跟踪缺失，仅作辅助警告",
+                "cueEvidence": cue_evidence, "reviewRequired": False, "trackingGap": True}
     return {"decision": "match", "reason": "门框红灯亮起且 5 秒内未退回",
             "cueEvidence": cue_evidence, "reviewRequired": False}
