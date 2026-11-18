@@ -20,8 +20,12 @@ class PoseAdapter:
     iou: float = 0.5
     tracker_yaml: str = "bytetrack.yaml"
     class_name: str = "person"
+    # PT0-1：>1 时走批量前向 + 按帧序 BYTETracker 关联（infer_batch）；
+    # =1 保持原有单帧 model.track 路径，语义与缓存行为不变。
+    batch_size: int = 1
     _model: Any = None
     _model_hash: str | None = None
+    _batch_tracker: Any = None
 
     # ------------------------------------------------------------------
     def load(self) -> None:
@@ -51,7 +55,50 @@ class PoseAdapter:
             results = self._model.predict(image_bgr, **kwargs)
         if not results:
             return []
-        r0 = results[0]
+        return self._persons_from_result(results[0], track=track)
+
+    # ------------------------------------------------------------------
+    def infer_batch(self, images_bgr: list[np.ndarray]) -> list[list[PersonObservation]]:
+        """批量前向 + 按帧序关联（PT0-1）。输入须按时间序排列。
+
+        检测用一次 batch predict；关联逐帧喂给独立 BYTETracker，精确复刻
+        ultralytics `on_predict_start / on_predict_postprocess_end`（persist=True、
+        非 stream 模式全局单 tracker、frame_rate=30、永不 reset），跟踪语义与
+        单帧 model.track 路径一致；仅前向改为批量。调用方不得混用 infer(track=True)
+        与本方法（两套 tracker 状态独立）。
+        """
+        if not images_bgr:
+            return []
+        import torch
+
+        self.load()
+        results = self._model.predict(images_bgr, verbose=False, device=self.device,
+                                      conf=self.conf, iou=self.iou)
+        tracker = self._bytetrack()
+        out: list[list[PersonObservation]] = []
+        for r0 in results:
+            det = r0.boxes.cpu().numpy()
+            tracks = tracker.update(det, r0.orig_img)
+            if len(tracks):
+                idx = tracks[:, -1].astype(int)
+                r0 = r0[idx]
+                r0.update(boxes=torch.as_tensor(tracks[:, :-1]))
+            out.append(self._persons_from_result(r0, track=True))
+        return out
+
+    def _bytetrack(self):
+        if self._batch_tracker is None:
+            from ultralytics.trackers.byte_tracker import BYTETracker
+            from ultralytics.utils import YAML, IterableSimpleNamespace
+            from ultralytics.utils.checks import check_yaml
+
+            cfg = IterableSimpleNamespace(**YAML.load(check_yaml(self.tracker_yaml)))
+            if getattr(cfg, "tracker_type", "bytetrack") != "bytetrack":
+                raise ValueError("Batch pose inference only supports bytetrack")
+            self._batch_tracker = BYTETracker(args=cfg, frame_rate=30)
+        return self._batch_tracker
+
+    def _persons_from_result(self, r0, *, track: bool) -> list[PersonObservation]:
         persons: list[PersonObservation] = []
         boxes = getattr(r0, "boxes", None)
         if boxes is None:

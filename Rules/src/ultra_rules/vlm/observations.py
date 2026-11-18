@@ -3,7 +3,9 @@ from __future__ import annotations
 import gzip
 import json
 import os
+import queue
 import sqlite3
+import threading
 import time
 from pathlib import Path
 
@@ -11,6 +13,89 @@ from .contracts import RunRequest
 from .media import sampled
 from .poi import PoiTracker
 from .storage import VERSION, append_json, digest, file_hash, progress, read_json, write_json
+
+
+def _env_int(name: str, default: int, lo: int, hi: int) -> int:
+    try:
+        return max(lo, min(hi, int(os.environ.get(name, "") or default)))
+    except ValueError:
+        return default
+
+
+def _chunks(items, size: int):
+    chunk = []
+    for item in items:
+        chunk.append(item)
+        if len(chunk) >= size:
+            yield chunk
+            chunk = []
+    if chunk:
+        yield chunk
+
+
+def _observation_row(index, t, source_type, width, height, source_pts, persons):
+    return {"frameIndex": index, "mediaTimeSec": t, "sourcePtsSec": source_pts,
+            "timeSource": source_type, "width": width, "height": height,
+            "persons": [p.model_dump(by_alias=True) for p in persons]}
+
+
+class _FramePipeline:
+    """PT0-2：解码线程 → 有界队列 → 推理消费者。
+
+    生产线程做解码 + bgr24 转换，使 CPU 段与 GPU 推理重叠；有界队列
+    提供背压并封顶内存（1080p 单帧约 6MB）。FIFO 保证帧序；生产端异常
+    在消费端重新抛出。close() 后生产线程自行退出（daemon 兜底）。
+    """
+
+    def __init__(self, frames, maxsize: int):
+        self._queue: queue.Queue = queue.Queue(maxsize=maxsize)
+        self._stop = threading.Event()
+        self._error: list[BaseException] = []
+        self._thread = threading.Thread(target=self._produce, args=(frames,), daemon=True)
+        self._thread.start()
+
+    def _put(self, item) -> bool:
+        while not self._stop.is_set():
+            try:
+                self._queue.put(item, timeout=0.2)
+                return True
+            except queue.Full:
+                continue
+        return False
+
+    def _produce(self, frames):
+        try:
+            for index, t, source_type, frame in frames:
+                item = (index, t, source_type, frame.width, frame.height,
+                        float(frame.time) if frame.time is not None else None,
+                        frame.to_ndarray(format="bgr24"))
+                if not self._put(item):
+                    return
+        except BaseException as exc:
+            self._error.append(exc)
+        finally:
+            self._put(None)
+
+    def rows(self):
+        while not self._stop.is_set():
+            try:
+                item = self._queue.get(timeout=0.2)
+            except queue.Empty:
+                continue
+            if item is None:
+                break
+            yield item
+        if self._error:
+            raise self._error[0]
+
+    def close(self):
+        self._stop.set()
+        # 排空队列，让阻塞在 put 的生产线程观察到 stop 标志后退出。
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
 
 
 def track(run_dir: Path):
@@ -25,6 +110,18 @@ def track(run_dir: Path):
     request = RunRequest.model_validate(config["request"])
     source, meta = Path(config["sourcePath"]), config["video"]
     model = Path(config["poseModelPath"])
+    # PT0 开关（默认保守串行）：批大小与解码/推理重叠独立可控。
+    batch = _env_int("ULTRA_VLM_POSE_BATCH", 1, 1, 64)
+    pipeline = os.environ.get("ULTRA_VLM_PIPELINE", "0") == "1"
+    if batch > 1:
+        # 批量前向在 TF32 下因 batch 形状不同产生 rounding 微差，长视频会被
+        # Kalman/关联放大成 trackId 切换（本轮实测 15000 帧中 3623 帧漂移）；
+        # 禁 TF32 + cuDNN 确定性后漂移收敛为 0（实测 bbox 差 ≤0.0005px）。
+        # 因此批量模式强制 FP32 确定性，语义与同精度串行基线一致。
+        torch.backends.cudnn.allow_tf32 = False
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.benchmark = False
+        torch.backends.cudnn.deterministic = True
     tracker_config = yaml.safe_load((Path(ultralytics.__file__).parent / "cfg/trackers/bytetrack.yaml").read_text())
     tracker_config["track_buffer"] = max(1, round(request.poseFps * request.maxGapSeconds))
     tracker_path = run_dir / "tracker.yaml"
@@ -32,12 +129,17 @@ def track(run_dir: Path):
     fingerprint = {"version": VERSION, "source": meta["sha256"], "model": file_hash(model),
                    "poseFps": request.poseFps, "conf": request.conf, "iou": request.iou,
                    "tracker": tracker_config, "ultralytics": ultralytics.__version__,
-                   "device": request.poseDevice, "timePolicy": "pyav-origin-scheduled-v1"}
+                   "device": request.poseDevice, "timePolicy": "pyav-origin-scheduled-v1",
+                   # 批量前向可能引入数值微差，缓存按推理模式隔离；
+                   # pipeline 不改变结果，不入指纹（开关间共享缓存）。
+                   "poseBatch": batch, "poseInfer": "batch-bytetrack" if batch > 1 else "ultralytics-track",
+                   "posePrecision": "fp32-deterministic" if batch > 1 else "default"}
     key = digest(fingerprint)
     cache = Path(config["cacheRoot"]) / f"{key}.jsonl.gz"
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache_hit = cache.exists()
-    progress(run_dir, stage="tracking", sampledFrames=0, candidateCount=0, cacheHit=cache_hit)
+    progress(run_dir, stage="tracking", sampledFrames=0, candidateCount=0, cacheHit=cache_hit,
+             poseBatch=batch, pipeline=pipeline)
     tracker = PoiTracker(request)
     db = sqlite3.connect(run_dir / "observations.sqlite")
     db.execute("CREATE TABLE observations (frame_index INTEGER PRIMARY KEY, time REAL NOT NULL, body TEXT NOT NULL)")
@@ -47,15 +149,33 @@ def track(run_dir: Path):
     def generate():
         nonlocal adapter
         torch.set_num_threads(4)
-        adapter = PoseAdapter(str(model), request.poseDevice, request.conf, request.iou, str(tracker_path))
+        adapter = PoseAdapter(str(model), request.poseDevice, request.conf, request.iou, str(tracker_path),
+                              batch_size=batch)
         adapter.load()
         if adapter._model.task != "pose":
             raise ValueError("Semantic analysis requires a pose model")
-        for index, t, source_type, frame in sampled(source, meta, request.poseFps):
-            persons = adapter.infer(frame.to_ndarray(format="bgr24"))
-            yield {"frameIndex": index, "mediaTimeSec": t, "sourcePtsSec": float(frame.time) if frame.time is not None else None,
-                   "timeSource": source_type, "width": frame.width, "height": frame.height,
-                   "persons": [p.model_dump(by_alias=True) for p in persons]}
+        frames = sampled(source, meta, request.poseFps)
+        pipe = _FramePipeline(frames, maxsize=max(8, batch * 2)) if pipeline else None
+        if pipe is not None:
+            items = pipe.rows()
+        else:
+            items = ((index, t, source_type, frame.width, frame.height,
+                      float(frame.time) if frame.time is not None else None,
+                      frame.to_ndarray(format="bgr24"))
+                     for index, t, source_type, frame in frames)
+        try:
+            if batch > 1:
+                for chunk in _chunks(items, batch):
+                    persons_batch = adapter.infer_batch([item[6] for item in chunk])
+                    for item, persons in zip(chunk, persons_batch, strict=True):
+                        yield _observation_row(*item[:6], persons)
+            else:
+                for index, t, source_type, width, height, source_pts, bgr in items:
+                    persons = adapter.infer(bgr)
+                    yield _observation_row(index, t, source_type, width, height, source_pts, persons)
+        finally:
+            if pipe is not None:
+                pipe.close()
 
     tmp = cache.with_suffix(f".{run_dir.name}.tmp")
     reader = gzip.open(cache, "rt", encoding="utf-8") if cache_hit else None

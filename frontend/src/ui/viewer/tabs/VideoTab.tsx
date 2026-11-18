@@ -103,6 +103,11 @@ export function VideoTab() {
   async function analyze() {
     const video = videoRef.current
     if (!video || !modelId || abortRef.current || previewAbortRef.current || !Number.isFinite(video.duration) || video.duration <= 0) return
+    // HEVC 等编码可能只加载出时长而解不出画面（videoWidth 为 0）：先走兼容预览回退。
+    if (!video.videoWidth || !video.videoHeight) {
+      void onDecodeError()
+      return
+    }
     const controller = new AbortController()
     abortRef.current = controller
     video.pause()
@@ -138,6 +143,8 @@ export function VideoTab() {
         if (controller.signal.aborted) break
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height)
         const jpeg = canvas.toDataURL('image/jpeg', 0.8).split(',')[1]
+        // 0×0 画布会得到 "data:,"（空 payload），后端会拒收并断开整个会话。
+        if (!jpeg) throw new Error(t('video.decodeError'))
         const pred = await session.infer(jpeg, analysis.params)
         if (controller.signal.aborted) break
         recordVideoFrame(analysis, tracker, pred, mediaTime)
@@ -400,7 +407,15 @@ export function VideoTab() {
         }}
       >
         <video ref={videoRef} className={styles.video} controls={!running} playsInline
-          onLoadedData={() => setVideoLoaded(Number.isFinite(videoRef.current?.duration) && (videoRef.current?.duration ?? 0) > 0)}
+          onLoadedData={() => {
+            const v = videoRef.current
+            const hasDuration = Number.isFinite(v?.duration) && (v?.duration ?? 0) > 0
+            const decodable = (v?.videoWidth ?? 0) > 0 && (v?.videoHeight ?? 0) > 0
+            setVideoLoaded(hasDuration && decodable)
+            // 浏览器读得出时长却解不出画面（如 Linux 下无 HEVC 硬解）时不会触发 error 事件，
+            // 这里主动转入 GPU 兼容预览回退，避免黑屏预览与空帧分析。
+            if (hasDuration && !decodable) void onDecodeError()
+          }}
           onError={() => void onDecodeError()}
           onPlay={() => { if (abortRef.current) videoRef.current?.pause(); else setLastPred(undefined) }}
           onSeeking={() => { if (!abortRef.current) setLastPred(undefined) }}

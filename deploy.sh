@@ -265,11 +265,11 @@ download_qwen() {
   CURRENT_STEP="[6/9] 下载 Qwen3-VL 视觉大模型（2B + 4B，共约 13 GB）"
   info "[6/9] 检查/下载 Qwen3-VL-2B-Instruct（ModelScope，约 4 GB，耗时取决于网速）"
   fetch_qwen "Qwen/Qwen3-VL-2B-Instruct" "$QWEN_DIR"
-  info "[6/9] 检查/下载 Qwen3-VL-4B-Instruct（ModelScope，约 9 GB，耗时取决于网速）"
+  #info "[6/9] 检查/下载 Qwen3-VL-4B-Instruct（ModelScope，约 9 GB，耗时取决于网速）"
   # 4B 体积大且非运行必需（默认用 2B）：下载失败不阻断部署，重跑 deploy.sh 会自动续传
-  if ! fetch_qwen "Qwen/Qwen3-VL-4B-Instruct" "$QWEN_4B_DIR"; then
-    warn "Qwen3-VL-4B 未下载完成；服务仍可用 2B 正常启动。稍后重新执行 bash deploy.sh 会自动续传 4B。"
-  fi
+  #if ! fetch_qwen "Qwen/Qwen3-VL-4B-Instruct" "$QWEN_4B_DIR"; then
+  #  warn "Qwen3-VL-4B 未下载完成；服务仍可用 2B 正常启动。稍后重新执行 bash deploy.sh 会自动续传 4B。"
+  #fi
 }
 
 # ------------------------------------------------------------ 7. 写入配置
