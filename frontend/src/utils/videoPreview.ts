@@ -1,8 +1,11 @@
-import { apiCreateVideoPreview, apiDeleteVideoPreview, apiVideoPreviewStatus, apiVideoPreviewUrl } from '../api/client'
+import {
+  apiCreateVideoPreviewFromVideo,
+  apiDeleteVideoPreview,
+  apiVideoPreviewStatus,
+  apiVideoPreviewUrl,
+} from '../api/client'
 
-export async function prepareVideoPreview(file: File, signal: AbortSignal, progress: (value: number) => void) {
-  // Let upload return an id even after cancellation so the server job can be removed.
-  const { id } = await apiCreateVideoPreview(file)
+async function pollPreviewJob(id: string, signal: AbortSignal, progress: (value: number) => void) {
   let url = ''
   const release = () => {
     if (url.startsWith('blob:')) URL.revokeObjectURL(url)
@@ -35,4 +38,10 @@ export async function prepareVideoPreview(file: File, signal: AbortSignal, progr
     release()
     throw error
   }
+}
+
+/** Browser fallback for server-imported videos: the bytes are already on the backend. */
+export async function prepareVideoPreviewFromVideo(videoId: string, signal: AbortSignal, progress: (value: number) => void) {
+  const { id } = await apiCreateVideoPreviewFromVideo(videoId)
+  return pollPreviewJob(id, signal, progress)
 }

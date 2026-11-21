@@ -6,6 +6,7 @@ from dataclasses import replace
 
 import app.library_api as library
 import app.main as main
+import app.playback as playback
 import app.security as security
 import app.video_api as video
 import app.vlm_api as vlm
@@ -82,6 +83,39 @@ def test_delete_preserves_shared_source_and_rejects_active(client):
     assert (vlm.DATA_ROOT / 'uploads/source1/source.mp4').read_bytes() == b'original'
     source = vlm.DATA_ROOT / 'uploads/source1/source.mp4'
     assert source.exists()
+
+
+def test_delete_last_run_removes_generated_playback_proxy(client):
+    folder = vlm.DATA_ROOT / 'uploads/source1'
+    (folder / 'playback.mp4').write_bytes(b'proxy')
+    write(folder / 'playback.json', {'videoId': 'source1', 'state': 'ready', 'version': playback.VERSION})
+    (folder / 'playback.partial.mp4').write_bytes(b'stale')
+    # A run whose status.json lost the videoId still resolves it via request.json.
+    write(vlm.DATA_ROOT / 'runs/legacy/status.json', {'runId': 'legacy', 'state': 'completed'})
+    write(vlm.DATA_ROOT / 'runs/legacy/request.json', {'request': {'videoId': 'source1'}})
+    assert client.delete('/api/library/vlm/legacy').status_code == 200
+    assert (folder / 'playback.mp4').read_bytes() == b'proxy'  # another run still references the video
+    assert client.delete('/api/library/vlm/analysis').status_code == 200
+    assert not (folder / 'playback.mp4').exists()
+    assert not (folder / 'playback.json').exists()
+    assert not (folder / 'playback.partial.mp4').exists()
+    # Shared sources and converted-preview cache keep their existing lifecycle.
+    assert (folder / 'source.mp4').read_bytes() == b'original'
+    assert (video.CACHE_ROOT / 'legacy-preview.mp4').exists()
+
+
+def test_delete_blocked_while_proxy_is_generating(client):
+    folder = vlm.DATA_ROOT / 'uploads/source1'
+    (folder / 'playback.mp4').write_bytes(b'proxy')
+    with playback._lock:
+        playback._active.add('source1')
+    try:
+        assert client.delete('/api/library/vlm/analysis').status_code == 409
+    finally:
+        playback._active.discard('source1')
+    # The rejected request removed nothing at all.
+    assert (vlm.DATA_ROOT / 'runs/analysis').exists()
+    assert (folder / 'playback.mp4').read_bytes() == b'proxy'
 
 
 def test_incomplete_runs_are_hidden_from_records(client):

@@ -13,7 +13,7 @@ from fastapi import APIRouter, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field, field_validator
 
-from . import video_api, vlm_api, vlm_jobs
+from . import playback, video_api, vlm_api, vlm_jobs
 
 router = APIRouter(prefix="/api/library", tags=["library"])
 Kind = Literal["vlm", "video"]
@@ -60,6 +60,26 @@ def _path(kind: Kind, identifier: str):
 
 def _metadata(kind: Kind, path: Path):
     return path.with_suffix(".json") if kind == "video" else path / "library.json"
+
+
+def _run_video_id(run_dir: Path):
+    # status.json carries the videoId while the run is known; request.json is
+    # written by prepare() before the first status update exists.
+    video_id = _read(run_dir / "status.json").get("videoId")
+    if not isinstance(video_id, str) or not video_id:
+        config = _read(run_dir / "request.json").get("request")
+        video_id = config.get("videoId") if isinstance(config, dict) else None
+    return video_id if isinstance(video_id, str) and video_id else None
+
+
+def _other_run_uses(video_id: str, except_dir: Path) -> bool:
+    root = _root("vlm")
+    if not root.exists():
+        return False
+    for candidate in root.iterdir():
+        if candidate.is_dir() and candidate != except_dir and _run_video_id(candidate) == video_id:
+            return True
+    return False
 
 
 def _timestamp(value, fallback: float):
@@ -193,6 +213,17 @@ def delete(kind: Kind, identifier: str):
                 if job.get("preview") == path:
                     job.update(state="failed", error="Saved preview was deleted from the library")
         else:
-            # Run-local evidence is removed; shared uploaded sources and tracking caches remain.
+            # Run-local evidence is removed; shared uploaded sources and tracking
+            # caches remain, and converted previews keep their own lifecycle. The
+            # generated playback proxy however belongs to this record: dropping
+            # the last run of a video drops its proxy (checked before deleting
+            # so a rejected request never removes the record).
+            video_id = _run_video_id(path)
+            shared = not video_id or _other_run_uses(video_id, path)
+            if video_id and not shared and playback.is_generating(video_id):
+                raise HTTPException(409, "A playback proxy is being generated for this video's recording; "
+                                         "delete the record after the transcode finishes")
             shutil.rmtree(path)
+            if video_id and not shared:
+                playback.remove_proxy(video_id)
         return {"ok": True}

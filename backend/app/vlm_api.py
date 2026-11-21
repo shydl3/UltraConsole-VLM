@@ -13,6 +13,7 @@ from typing import Literal
 
 from fastapi import APIRouter, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
 
 from . import event_rules, vlm_jobs
 from .vlm_jobs import TERMINAL, AnalysisParameters, RunRequest, iter_jsonl, prepare, read_json, write_json
@@ -25,6 +26,10 @@ MAX_BYTES = int(os.environ.get("VLM_MAX_UPLOAD_BYTES", str(128 * 1024**3)))
 MAX_DURATION_SEC = float(os.environ.get("VLM_MAX_DURATION_SEC", "172800"))
 CHUNK_SIZE = 16 * 1024 * 1024
 ALLOWED_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
+# Server-side file picker root for remote deployments: the browser must not open
+# a local file dialog for videos that already live on this machine.
+BROWSE_ROOT = Path(os.environ.get("VLM_BROWSE_ROOT", str(Path.home()))).expanduser().resolve()
+BROWSE_LIMIT = 500
 router = APIRouter(prefix="/api/vlm", tags=["vlm"])
 # In-flight chunked uploads: uploadId -> {dest, suffix, filename, received, size}
 _pending_uploads: dict[str, dict] = {}
@@ -181,6 +186,110 @@ def _finalize_upload(dest: Path, source: Path, video_id: str, filename: str, siz
                 sha256=sha, sizeBytes=size, sourceName=source.name)
     write_json(dest / "video.json", meta)
     return meta
+
+
+class VideoImport(BaseModel):
+    path: str = Field(min_length=1, max_length=2048)
+
+
+def _browse_root() -> Path:
+    root = Path(BROWSE_ROOT).expanduser()
+    try:
+        return root.resolve(strict=True)
+    except OSError:
+        raise HTTPException(500, "Configured VLM_BROWSE_ROOT does not exist") from None
+
+
+def _under_root(target: Path) -> Path:
+    root = _browse_root()
+    try:
+        resolved = target.expanduser().resolve(strict=True)
+    except OSError:
+        raise HTTPException(404, "Path not found") from None
+    if resolved != root and root not in resolved.parents:
+        raise HTTPException(400, "Path is outside the configured browse root (VLM_BROWSE_ROOT)")
+    return resolved
+
+
+@router.get("/browse")
+def browse(path: str = Query(default="", max_length=2048)):
+    """List one directory of server-local videos for the remote file picker."""
+    folder = _under_root(Path(path) if path else _browse_root())
+    if not folder.is_dir():
+        raise HTTPException(400, "Not a directory")
+    root = _browse_root()
+    try:
+        candidates = sorted(folder.iterdir(), key=lambda item: item.name.lower())
+    except OSError:
+        raise HTTPException(403, "Directory is not readable") from None
+    dirs, files = [], []
+    for candidate in candidates:
+        if len(dirs) + len(files) >= BROWSE_LIMIT:
+            break
+        if candidate.name.startswith("."):
+            continue
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue  # broken symlink
+        # Never expose (or walk into) anything the root does not cover, even
+        # through a symlink that resolves back inside or outside the tree.
+        if resolved != root and root not in resolved.parents:
+            continue
+        if candidate.is_dir():
+            dirs.append({"name": candidate.name, "path": str(candidate)})
+        elif candidate.is_file() and candidate.suffix.lower() in ALLOWED_SUFFIXES:
+            stat = candidate.stat()
+            files.append({"name": candidate.name, "path": str(candidate),
+                          "size": stat.st_size, "mtime": stat.st_mtime})
+    return {"root": str(root), "path": str(folder),
+            "parent": None if folder == root else str(folder.parent),
+            "dirs": dirs, "files": files, "truncated": len(dirs) + len(files) >= BROWSE_LIMIT}
+
+
+@router.post("/videos/import")
+def import_video(request: VideoImport):
+    """Register a server-side file as an uploaded video without any transfer.
+
+    Reuses an existing copy of the same content, hard-links when the file
+    already shares the uploads filesystem, and only falls back to a local copy
+    across devices; bytes never travel over the browser's connection.
+    """
+    source = _under_root(Path(request.path))
+    if not source.is_file():
+        raise HTTPException(404, "Video file not found")
+    if source.suffix.lower() not in ALLOWED_SUFFIXES:
+        raise HTTPException(400, "Unsupported video extension")
+    size = source.stat().st_size
+    if not size:
+        raise HTTPException(400, "Empty video")
+    if _too_large(size):
+        raise HTTPException(413, f"Video exceeds the {MAX_BYTES / 1024**3:.0f}GiB upload limit (VLM_MAX_UPLOAD_BYTES)")
+    h = hashlib.sha256()
+    with source.open("rb") as stream:
+        while chunk := stream.read(4 * 1024 * 1024):
+            h.update(chunk)
+    sha = h.hexdigest()
+    uploads = DATA_ROOT / "uploads"
+    if uploads.is_dir():
+        for existing in uploads.glob("*/video.json"):
+            meta = read_json(existing)
+            if meta.get("sha256") == sha and (existing.parent / str(meta.get("sourceName", ""))).is_file():
+                return {**meta, "reused": True}
+    video_id = uuid.uuid4().hex
+    dest = uploads / video_id
+    dest.mkdir(parents=True)
+    target = dest / f"source{source.suffix.lower()}"
+    try:
+        try:
+            os.link(source, target)
+        except OSError:
+            shutil.copyfile(source, target)
+        meta = _finalize_upload(dest, target, video_id, source.name, size, sha)
+    except Exception:
+        shutil.rmtree(dest, ignore_errors=True)
+        raise
+    return {**meta, "reused": False}
 
 
 @router.post("/videos")

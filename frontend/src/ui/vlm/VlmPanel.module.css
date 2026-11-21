@@ -22,8 +22,6 @@
 .parameterSnapshot dt { color: var(--fg-2); }
 .parameterSnapshot dd { margin: 0; }
 .files { border: 1px solid var(--line-0); border-radius: 8px; padding: 12px; display: grid; gap: 10px; }
-.fileBtn { cursor: pointer; border: 1px solid var(--line-0); background: var(--panel-2, #151e2a); border-radius: 6px; padding: 6px 8px; }
-.fileBtn input { display: none; }
 .fileList { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; max-height: 160px; overflow: auto; }
 .fileRow { display: flex; align-items: center; gap: 10px; font-size: 12px; }
 .fileName { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

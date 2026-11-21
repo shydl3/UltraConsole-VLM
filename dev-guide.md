@@ -58,7 +58,7 @@
 ### 3.1 一次分析任务的完整链路
 
 ```
-前端(上传视频 + 画线/区/信号区 + 定义规则)
+前端(从服务器选择/导入视频 + 画线/区/信号区 + 定义规则)
         │  POST /api/vlm/runs/from-rules
         ▼
 后端 event_rules.resolve()  →  RunRequest(request.json)
@@ -512,7 +512,8 @@ T_端到端 ≈ T_segment + T_tracking + T_cues + T_integrity + T_understand
 | `store/useUiStore.ts` | 控制台 / 库 视图切换 |
 | `utils/vlm.ts` / `eventRules.ts` / `vlmParameters.ts` | VLM 请求构造与类型 |
 | `utils/videoAnalysis.ts` / `events.ts` / `roi.ts` / `useEventTracker.ts` / `useSystemStats.ts` / `draw.ts` / `configIO.ts` | 实时视频分析（`VideoInferenceSession` 单帧在途）、事件追踪、ROI、画图、配置导入导出 |
-| `utils/videoPreview.ts` | 兼容预览：上传 → 轮询转码进度 → 取播放 URL → 释放（HEVC 回退入口，见 4.5） |
+| `utils/videoPreview.ts` | 兼容预览：从已导入视频发起转码（`/from-video`）→ 轮询进度 → 取播放 URL → 释放（HEVC 回退入口，见 4.5） |
+| `ui/viewer/widgets/ServerVideoDialog.tsx` | 服务器视频浏览弹窗：`GET /api/vlm/browse` 逐级浏览 `VLM_BROWSE_ROOT` 内目录，确定时 `POST /api/vlm/videos/import` 按引用登记（硬链接/复用，不走浏览器上传） |
 
 ### 7.2 运行与验证命令
 

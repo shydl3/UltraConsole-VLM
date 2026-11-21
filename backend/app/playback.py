@@ -118,6 +118,33 @@ def _run(video_id: str, source: Path, target: Path, status_path: Path) -> None:
             _active.discard(video_id)
 
 
+def is_generating(video_id: str) -> bool:
+    with _lock:
+        return video_id in _active
+
+
+def remove_proxy(video_id: str) -> bool:
+    """Delete a video's generated review proxy (upload source and preview cache stay).
+
+    Unknown or malformed ids have nothing to clean up, so they report False;
+    an in-flight transcode must finish (and be reviewed) before removal.
+    """
+    if is_generating(video_id):
+        raise HTTPException(409, "Playback proxy is being generated; delete it after the transcode finishes")
+    try:
+        folder, target, status_path = _paths(video_id)
+    except HTTPException as exc:
+        if exc.status_code in {400, 404}:
+            return False
+        raise
+    removed = False
+    for candidate in (target, status_path, target.with_name(f"{target.stem}.partial.mp4")):
+        if candidate.is_file():
+            candidate.unlink()
+            removed = True
+    return removed
+
+
 @router.get("/{video_id}/playback")
 def playback_status(video_id: str):
     folder, target, _status_path = _paths(video_id)

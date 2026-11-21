@@ -12,6 +12,7 @@ from fractions import Fraction
 import app.main as main
 import app.security as security
 import app.video_api as api
+import app.vlm_api as vlm
 import av
 import numpy as np
 import pytest
@@ -143,6 +144,54 @@ def test_invalid_and_oversize_video(client, monkeypatch):
     assert client.post("/api/video/previews", files={"file": ("large.mp4", b"12345")}).status_code == 413
     assert list(api.ROOT.iterdir()) == []
     assert not api.CACHE_ROOT.exists()
+
+
+def imported_video(tmp_path, monkeypatch, content=b"server-side-video"):
+    """Simulate a video already registered on the server via import/upload."""
+    monkeypatch.setattr(vlm, "DATA_ROOT", tmp_path / "vlm-data")
+    folder = vlm.DATA_ROOT / "uploads" / "vid0001"
+    folder.mkdir(parents=True)
+    (folder / "source.mp4").write_bytes(content)
+    (folder / "video.json").write_text(json.dumps(
+        {"videoId": "vid0001", "fileName": "监控.mp4", "sourceName": "source.mp4",
+         "sha256": hashlib.sha256(content).hexdigest(), "sizeBytes": len(content)}))
+    return folder
+
+
+def test_preview_from_imported_video_never_reconverts_or_consumes_source(client, tmp_path, monkeypatch):
+    conversions = []
+
+    def fake_transcode(source, target, cancel, progress):
+        conversions.append(source.read_bytes())
+        target.write_bytes(b"finished-preview")
+
+    monkeypatch.setattr(api, "transcode", fake_transcode)
+    source_folder = imported_video(tmp_path, monkeypatch)
+    assert client.post("/api/video/previews/from-video", json={"videoId": "missing"}).status_code == 404
+    response = client.post("/api/video/previews/from-video", json={"videoId": "vid0001"})
+    assert response.status_code == 202, response.text
+    identifier = response.json()["id"]
+    assert wait_for_preview(client, identifier)["state"] == "ready"
+    assert conversions == [b"server-side-video"]
+    saved = api.jobs[identifier]["preview"]
+    assert saved == api.CACHE_ROOT / f"{hashlib.sha256(b'server-side-video').hexdigest()}.mp4"
+    assert client.get(f"/api/video/previews/{identifier}/source").content == b"finished-preview"
+    # The imported original must survive the preview job's cleanup.
+    assert (source_folder / "source.mp4").read_bytes() == b"server-side-video"
+    # A repeat request hits the cache instead of converting again.
+    second = client.post("/api/video/previews/from-video", json={"videoId": "vid0001"}).json()["id"]
+    assert wait_for_preview(client, second)["state"] == "ready"
+    assert conversions == [b"server-side-video"]
+    assert client.get(f"/api/video/previews/{second}/source").content == b"finished-preview"
+
+
+def test_preview_from_imported_video_respects_limits(client, tmp_path, monkeypatch):
+    imported_video(tmp_path, monkeypatch)
+    monkeypatch.setattr(api, "MAX_BYTES", 4)
+    assert client.post("/api/video/previews/from-video", json={"videoId": "vid0001"}).status_code == 413
+    (vlm.DATA_ROOT / "uploads/vid0001/video.json").write_text(json.dumps(
+        {"videoId": "vid0001", "sourceName": "source.mp4", "sizeBytes": 1}))
+    assert client.post("/api/video/previews/from-video", json={"videoId": "vid0001"}).status_code == 400
 
 
 def test_cancel_and_concurrency(client, monkeypatch):

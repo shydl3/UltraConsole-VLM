@@ -16,6 +16,9 @@ from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, UploadFile
 from fastapi.responses import FileResponse
+from pydantic import BaseModel, Field
+
+from . import vlm_api
 
 router = APIRouter(prefix="/api/video/previews", tags=["video"])
 ROOT = Path(__file__).resolve().parents[2] / "tmp" / "video-previews"
@@ -30,6 +33,10 @@ MAX_CONCURRENT = int(os.getenv("ULTRA_VIDEO_MAX_CONCURRENT", "2"))
 _convert_semaphore = threading.Semaphore(MAX_CONCURRENT)
 jobs: dict[str, dict] = {}
 lock = threading.RLock()
+
+
+class PreviewFromVideo(BaseModel):
+    videoId: str = Field(min_length=1, max_length=80, pattern=r"[A-Za-z0-9_-]+")
 
 
 def _publish_preview(job: dict) -> None:
@@ -121,7 +128,7 @@ def _run(identifier: str) -> None:
         with _convert_semaphore:
             if job["cancel"].is_set():
                 raise InterruptedError("Preview cancelled")
-            transcode(folder / "source", folder / "preview.mp4", job["cancel"], progress)
+            transcode(job["sourcePath"], folder / "preview.mp4", job["cancel"], progress)
         if job["cancel"].is_set():
             raise InterruptedError("Preview cancelled")
         _publish_preview(job)
@@ -165,7 +172,8 @@ def create_preview(file: UploadFile):
             if old not in active_folders and old.stat().st_mtime < time.time() - 86400:
                 shutil.rmtree(old, ignore_errors=True)
         folder = Path(tempfile.mkdtemp(prefix="preview-", dir=ROOT))
-        jobs[identifier] = {"folder": folder, "state": "uploading", "progress": 0, "cancel": threading.Event()}
+        jobs[identifier] = {"folder": folder, "sourcePath": folder / "source", "state": "uploading",
+                            "progress": 0, "cancel": threading.Event()}
     try:
         size = 0
         digest = hashlib.sha256()
@@ -200,6 +208,41 @@ def create_preview(file: UploadFile):
         raise
     finally:
         file.file.close()
+
+
+@router.post("/from-video", status_code=202)
+def create_preview_from_video(request: PreviewFromVideo):
+    """Convert an already-imported server-side video; no bytes are re-uploaded."""
+    source_folder = vlm_api.directory("uploads", request.videoId)
+    meta = vlm_api.read_json(source_folder / "video.json")
+    source = source_folder / str(meta.get("sourceName") or "")
+    if not source.is_file():
+        raise HTTPException(404, "Imported video source is missing")
+    size = int(meta.get("sizeBytes") or source.stat().st_size)
+    if size > MAX_BYTES:
+        raise HTTPException(413, "Video exceeds preview upload limit")
+    checksum = str(meta.get("sha256") or "")
+    if len(checksum) != 64:
+        raise HTTPException(400, "Imported video has no content checksum; import it again")
+    with lock:
+        if sum(1 for job in jobs.values() if job["state"] == "converting") >= MAX_CONCURRENT * 4:
+            raise HTTPException(429, "Preview conversion queue is full; retry shortly")
+        identifier = uuid.uuid4().hex
+        ROOT.mkdir(parents=True, exist_ok=True)
+        folder = Path(tempfile.mkdtemp(prefix="preview-", dir=ROOT))
+        preview = CACHE_ROOT / f"{checksum}.mp4"
+        cached = preview.is_file() and preview.stat().st_size > 0
+        jobs[identifier] = {
+            "folder": folder, "sourcePath": source, "state": "ready" if cached else "converting",
+            "progress": 100 if cached else 0, "cancel": threading.Event(), "sha256": checksum,
+            "preview": preview, "size": size, "filename": str(meta.get("fileName") or "video"),
+        }
+        if cached:
+            jobs[identifier]["finished"] = time.time()
+            shutil.rmtree(folder, ignore_errors=True)
+            return {"id": identifier}
+    threading.Thread(target=_run, args=(identifier,), daemon=True).start()
+    return {"id": identifier}
 
 
 @router.get("/{identifier}")

@@ -27,12 +27,16 @@ def client(tmp_path, monkeypatch, local_vlm_models):
     return TestClient(main.app, headers={"authorization": "Bearer secret"})
 
 
-def upload(client, tmp_path):
-    path = tmp_path / "clip.mp4"
+def make_clip(path):
     writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 25, (96, 64))
     for _ in range(25):
         writer.write(np.zeros((64, 96, 3), np.uint8))
     writer.release()
+    return path
+
+
+def upload(client, tmp_path):
+    path = make_clip(tmp_path / "clip.mp4")
     result = client.post("/api/vlm/videos", files={"file": ("clip.mp4", path.read_bytes(), "video/mp4")})
     assert result.status_code == 200, result.text
     return result.json()["videoId"]
@@ -338,3 +342,65 @@ def test_backend_imports_without_rules_pythonpath():
     completed = subprocess.run([sys.executable, "-c", "from app.main import app; print(app.title)"],
                                cwd=Path(__file__).resolve().parents[1], env=env, capture_output=True, text=True, timeout=30)
     assert completed.returncode == 0, completed.stderr
+
+
+def test_browse_lists_only_videos_under_root(client, tmp_path, monkeypatch):
+    media = tmp_path / "media"
+    (media / "sub").mkdir(parents=True)
+    make_clip(media / "a.mp4")
+    (media / "notes.txt").write_text("x")
+    (media / ".hidden.mp4").write_bytes(b"x")
+    (media / "escape").symlink_to(tmp_path)
+    (media / "broken.mp4").symlink_to(media / "missing.mp4")
+    monkeypatch.setattr(api, "BROWSE_ROOT", media.resolve())
+    listing = client.get("/api/vlm/browse").json()
+    assert listing["path"] == str(media.resolve()) and listing["parent"] is None
+    assert [item["name"] for item in listing["dirs"]] == ["sub"]
+    files = listing["files"]
+    assert [item["name"] for item in files] == ["a.mp4"]
+    assert files[0]["size"] > 0 and files[0]["mtime"] > 0
+    # Navigation cannot leave the root, not even via symlink or .. tricks.
+    assert client.get("/api/vlm/browse", params={"path": str(tmp_path)}).status_code == 400
+    assert client.get("/api/vlm/browse", params={"path": str(media / "a.mp4/../..")}).status_code == 400
+    assert client.get("/api/vlm/browse", params={"path": str(media / "missing")}).status_code == 404
+
+
+def test_import_registers_server_video_without_transfer(client, tmp_path, monkeypatch):
+    media = tmp_path / "media"
+    media.mkdir()
+    clip = make_clip(media / "a.mp4")
+    (media / "notes.txt").write_text("x")
+    (media / "broken.mp4").write_bytes(b"not a video")
+    (media / "empty.mp4").write_bytes(b"")
+    monkeypatch.setattr(api, "BROWSE_ROOT", media.resolve())
+    (tmp_path / "outside.mp4").write_bytes(b"x")
+    assert client.post("/api/vlm/videos/import", json={"path": str(tmp_path / "outside.mp4")}).status_code == 400
+    assert client.post("/api/vlm/videos/import", json={"path": str(media / "missing.mp4")}).status_code == 404
+    assert client.post("/api/vlm/videos/import", json={"path": str(media / "notes.txt")}).status_code == 400
+    assert client.post("/api/vlm/videos/import", json={"path": str(media / "empty.mp4")}).status_code == 400
+    assert client.post("/api/vlm/videos/import", json={"path": str(media / "broken.mp4")}).status_code == 400
+    assert not (api.DATA_ROOT / "uploads").exists() or list((api.DATA_ROOT / "uploads").iterdir()) == []
+    result = client.post("/api/vlm/videos/import", json={"path": str(clip)})
+    assert result.status_code == 200, result.text
+    body = result.json()
+    assert body["reused"] is False and body["fileName"] == "a.mp4"
+    video_id = body["videoId"]
+    assert client.get(f"/api/vlm/videos/{video_id}/source").content == clip.read_bytes()
+    # Same-filesystem imports hard-link instead of duplicating the recording.
+    assert (api.DATA_ROOT / "uploads" / video_id / "source.mp4").stat().st_ino == clip.stat().st_ino
+    again = client.post("/api/vlm/videos/import", json={"path": str(clip)}).json()
+    assert again["reused"] is True and again["videoId"] == video_id
+
+
+def test_imported_video_serves_library_and_run_flows(client, tmp_path, monkeypatch):
+    media = tmp_path / "media"
+    media.mkdir()
+    clip = make_clip(media / "cam.mp4")
+    monkeypatch.setattr(api, "BROWSE_ROOT", media.resolve())
+    video_id = client.post("/api/vlm/videos/import", json={"path": str(clip)}).json()["videoId"]
+    launched = []
+    monkeypatch.setattr(jobs, "launch", lambda folder, python: launched.append(folder))
+    payload = {"videoId": video_id, "pois": [{"id": "gate", "kind": "line", "points": [[.2, .2], [.8, .8]]}],
+               "events": [{"id": "e", "description": "test"}]}
+    assert client.post("/api/vlm/runs", json=payload).status_code == 200
+    assert len(launched) == 1

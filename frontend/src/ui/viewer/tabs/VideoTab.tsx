@@ -9,9 +9,11 @@ import { NeoButton } from '../../primitives/NeoButton'
 import { TelemetryHUD } from '../widgets/TelemetryHUD'
 import { VideoCanvasOverlay } from '../widgets/VideoCanvasOverlay'
 import { RoiOverlay } from '../widgets/RoiOverlay'
+import { ServerVideoDialog } from '../widgets/ServerVideoDialog'
 import styles from './VideoTab.module.css'
 import { VlmPanel } from '../../vlm/VlmPanel'
-import { prepareVideoPreview } from '../../../utils/videoPreview'
+import { prepareVideoPreviewFromVideo } from '../../../utils/videoPreview'
+import { apiVlmMedia, type ServerVideo } from '../../../api/client'
 
 export function VideoTab() {
   const t = useT()
@@ -27,8 +29,7 @@ export function VideoTab() {
   const videoRef = useRef<HTMLVideoElement | null>(null)
   const captureCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const abortRef = useRef<AbortController | null>(null)
-  const urlRef = useRef<string | null>(null)
-  const pickedFileRef = useRef<File | null>(null)
+  const pickedVideoRef = useRef<ServerVideo | null>(null)
   const previewAbortRef = useRef<AbortController | null>(null)
   const previewReleaseRef = useRef<(() => void) | null>(null)
   const fallbackAttemptedRef = useRef(false)
@@ -37,12 +38,12 @@ export function VideoTab() {
   const reportRef = useRef<VideoReport | null>(null)
   const [report, setReport] = useState<VideoReport | null>(null)
   const [fileName, setFileName] = useState('')
-  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [selectedVideo, setSelectedVideo] = useState<ServerVideo | null>(null)
+  const [browserOpen, setBrowserOpen] = useState(false)
   const [semanticBusy, setSemanticBusy] = useState(false)
   const [running, setRunning] = useState(false)
   const [videoLoaded, setVideoLoaded] = useState(false)
   const [targetFps, setTargetFps] = useState(8)
-  const [dragOver, setDragOver] = useState(false)
   const [editTool, setEditTool] = useState<'none' | 'line' | 'zone' | 'cue' | 'integrity'>('none')
   const [roiMenuOpen, setRoiMenuOpen] = useState(false)
   const roiMenuRef = useRef<HTMLDivElement | null>(null)
@@ -94,7 +95,6 @@ export function VideoTab() {
       abortRef.current?.abort()
       previewAbortRef.current?.abort()
       previewReleaseRef.current?.()
-      if (urlRef.current) URL.revokeObjectURL(urlRef.current)
       useConsoleStore.getState().setLastPred(undefined)
       useConsoleStore.getState().resetCounters()
     }
@@ -171,16 +171,16 @@ export function VideoTab() {
     }
   }
 
-  function onPick(file?: File) {
-    if (!file || abortRef.current || semanticBusy) return
-    const video = videoRef.current
-    if (!video) return
+  async function onPick(video: ServerVideo) {
+    if (abortRef.current || semanticBusy) return
+    const element = videoRef.current
+    if (!element) return
     previewAbortRef.current?.abort()
     previewAbortRef.current = null
     previewReleaseRef.current?.()
     previewReleaseRef.current = null
     fallbackAttemptedRef.current = false
-    pickedFileRef.current = file
+    pickedVideoRef.current = video
     setPreparing(false)
     setPreviewProgress(null)
     setVideoLoaded(false)
@@ -190,22 +190,27 @@ export function VideoTab() {
     setReport(null)
     reportRef.current = null
     setEditTool('none')
-    setFileName(file.name)
-    setSelectedFile(file)
-    if (urlRef.current) URL.revokeObjectURL(urlRef.current)
-    const url = URL.createObjectURL(file)
-    urlRef.current = url
-    video.src = url
-    video.load()
-    pushLog({ ts: Date.now() / 1000, level: 'INFO', event: 'video.loaded', msg: file.name, fields: {} })
+    setFileName(video.name)
+    setSelectedVideo(video)
+    try {
+      // Server-side import + cookie-authenticated Range streaming: no upload,
+      // no multi-gigabyte blob in the browser.
+      const url = await apiVlmMedia(`/videos/${video.videoId}/source`)
+      if (pickedVideoRef.current !== video || !videoRef.current) return
+      videoRef.current.src = url
+      videoRef.current.load()
+      pushLog({ ts: Date.now() / 1000, level: 'INFO', event: 'video.loaded', msg: video.name, fields: {} })
+    } catch (e) {
+      if (pickedVideoRef.current === video) setError(String(e))
+    }
   }
 
   async function onDecodeError() {
     if (previewAbortRef.current) return
     setVideoLoaded(false)
     abortRef.current?.abort()
-    const file = pickedFileRef.current
-    if (!file || fallbackAttemptedRef.current || abortRef.current) {
+    const video = pickedVideoRef.current
+    if (!video || fallbackAttemptedRef.current || abortRef.current) {
       setError(t('video.decodeError'))
       return
     }
@@ -216,14 +221,12 @@ export function VideoTab() {
     setPreviewProgress(null)
     setError('')
     try {
-      const preview = await prepareVideoPreview(file, controller.signal, setPreviewProgress)
-      if (controller.signal.aborted || pickedFileRef.current !== file || !videoRef.current) {
+      const preview = await prepareVideoPreviewFromVideo(video.videoId, controller.signal, setPreviewProgress)
+      if (controller.signal.aborted || pickedVideoRef.current !== video || !videoRef.current) {
         preview.release()
         return
       }
       previewReleaseRef.current = preview.release
-      if (urlRef.current) URL.revokeObjectURL(urlRef.current)
-      urlRef.current = null
       videoRef.current.src = preview.url
       videoRef.current.load()
     } catch (error) {
@@ -275,10 +278,9 @@ export function VideoTab() {
   return (
     <div className={styles.wrap}>
       <div className={styles.toolbar}>
-        <label className={styles.fileBtn}>
-          <input className={styles.fileInput} type="file" disabled={running || semanticBusy} accept="video/*,.mp4,.mov,.mkv,.avi,.m4v,.webm,.ts,.ps,.dav" onChange={(e) => { onPick(e.target.files?.[0]); e.target.value = '' }} />
-          {t('video.selectVideo')}
-        </label>
+        <NeoButton disabled={running || semanticBusy} onClick={() => setBrowserOpen(true)}>
+          {fileName ? `${t('video.selectVideo')} · ${fileName}` : t('video.selectVideo')}
+        </NeoButton>
 
         {!running ? (
           <NeoButton onClick={() => void analyze()} disabled={!videoLoaded || !modelId || semanticBusy || preparing}>
@@ -389,23 +391,7 @@ export function VideoTab() {
           setError(t('video.prepareCancelled'))
         }}>{t('common.stop')}</NeoButton>
       </div>}
-      <div
-        className={[styles.stage, dragOver ? styles.dropOver : ''].join(' ')}
-        onDragOver={(e) => {
-          e.preventDefault()
-          if (e.dataTransfer) e.dataTransfer.dropEffect = 'copy'
-          if (!dragOver) setDragOver(true)
-        }}
-        onDragLeave={(e) => {
-          if (e.currentTarget === e.target) setDragOver(false)
-        }}
-        onDrop={(e) => {
-          e.preventDefault()
-          setDragOver(false)
-          const file = e.dataTransfer?.files?.[0]
-          if (file && (file.type.startsWith('video/') || /\.(mp4|mov|mkv|avi|m4v|webm|ts|ps|dav)$/i.test(file.name))) onPick(file)
-        }}
-      >
+      <div className={styles.stage}>
         <video ref={videoRef} className={styles.video} controls={!running} playsInline
           onLoadedData={() => {
             const v = videoRef.current
@@ -424,9 +410,12 @@ export function VideoTab() {
         <RoiOverlay anchorRef={videoRef} />
         <EventEditOverlay ref={editOverlayRef} key={editTool} anchorRef={videoRef} enabled={editTool !== 'none'} mode={editTool === 'none' ? 'line' : editTool} />
         <TelemetryHUD telemetry={filteredPred?.telemetry} />
-        {dragOver && <div className={styles.dropHint}>{t('video.dropHint')}</div>}
       </div>
-      <VlmPanel file={selectedFile} eventsConfig={eventsConfig} basicRunning={running || preparing} onBusyChange={setSemanticBusy} />
+      <VlmPanel video={selectedVideo} eventsConfig={eventsConfig} basicRunning={running || preparing} onBusyChange={setSemanticBusy} />
+      {browserOpen && <ServerVideoDialog multiple={false} onClose={() => setBrowserOpen(false)} onPicked={videos => {
+        setBrowserOpen(false)
+        if (videos[0]) void onPick(videos[0])
+      }} />}
     </div>
   )
 }

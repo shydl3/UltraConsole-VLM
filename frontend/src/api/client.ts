@@ -114,72 +114,46 @@ export async function apiVlm<T>(path: string, init: RequestInit = {}): Promise<T
   return json<T>(await apiFetch(`/api/vlm${path}`, init))
 }
 
-export type UploadProgress = { uploaded: number; total: number }
-
-/**
- * Chunked, resumable upload for large videos. Splits the file into 16 MiB
- * parts, uploads them sequentially with per-part retry, and reports byte-level
- * progress. Aborting the signal cleans up the server-side pending upload.
- */
-export async function apiVlmUploadChunked(
-  file: File,
-  onProgress: (p: UploadProgress) => void,
-  signal?: AbortSignal,
-): Promise<{ videoId: string }> {
-  const init = await apiVlm<{ uploadId: string; chunkSize: number }>('/videos/init', {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ filename: file.name, size: file.size }),
-    signal,
-  })
-  const { uploadId, chunkSize } = init
-  const total = file.size
-  let uploaded = 0
-  const cleanup = () => { void apiFetch(`/api/vlm/videos/${uploadId}`, { method: 'DELETE' }).catch(() => {}) }
-  try {
-    for (let offset = 0, index = 0; offset < total; offset += chunkSize, index++) {
-      if (signal?.aborted) throw new DOMException('Aborted', 'AbortError')
-      const blob = file.slice(offset, Math.min(offset + chunkSize, total))
-      let attempt = 0
-      for (;;) {
-        try {
-          await apiFetch(`/api/vlm/videos/${uploadId}/parts/${index}`, {
-            method: 'PUT',
-            headers: { 'content-type': 'application/octet-stream' },
-            body: blob,
-            signal,
-          })
-          break
-        } catch (e) {
-          if (signal?.aborted) throw e
-          if (++attempt > 3) throw e
-          await new Promise(r => setTimeout(r, 500 * attempt))
-        }
-      }
-      uploaded += blob.size
-      onProgress({ uploaded, total })
-    }
-    const meta = await apiVlm<{ videoId: string }>(`/videos/${uploadId}/complete`, { method: 'POST', signal })
-    onProgress({ uploaded: total, total })
-    return meta
-  } catch (e) {
-    cleanup()
-    throw e
-  }
-}
-
 export async function apiVlmMedia(path: string): Promise<string> {
   // Cookie auth lets media elements stream directly; never blob whole videos.
   await apiEnsureSession()
   return `/api/vlm${path}`
 }
 
+/** One entry of the server-side video browser (see GET /api/vlm/browse). */
+export type ServerBrowseListing = {
+  root: string
+  path: string
+  parent: string | null
+  dirs: { name: string; path: string }[]
+  files: { name: string; path: string; size: number; mtime: number }[]
+  truncated: boolean
+}
+
+/** A video that already lives on the server; playback and analysis use videoId, no upload. */
+export type ServerVideo = { videoId: string; name: string; size: number }
+
+export function apiVlmBrowse(path: string, signal?: AbortSignal) {
+  return apiVlm<ServerBrowseListing>(`/browse?path=${encodeURIComponent(path)}`, { signal })
+}
+
+export async function apiVlmImportVideo(path: string): Promise<ServerVideo> {
+  const meta = await apiVlm<{ videoId: string; fileName: string; sizeBytes: number }>('/videos/import', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+  return { videoId: meta.videoId, name: meta.fileName, size: meta.sizeBytes }
+}
+
 export type VideoPreviewStatus = { state: 'uploading' | 'converting' | 'ready' | 'failed' | 'cancelled'; progress: number; error?: string }
 
-export async function apiCreateVideoPreview(file: File) {
-  const body = new FormData()
-  body.append('file', file)
-  return json<{ id: string }>(await apiFetch('/api/video/previews', { method: 'POST', body }))
+export async function apiCreateVideoPreviewFromVideo(videoId: string) {
+  return json<{ id: string }>(await apiFetch('/api/video/previews/from-video', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ videoId }),
+  }))
 }
 
 export async function apiVideoPreviewStatus(id: string, signal: AbortSignal) {
