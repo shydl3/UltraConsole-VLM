@@ -108,7 +108,10 @@ export function ReviewVideo({ src, markers, preRoll, onPreRoll, follow, onFollow
     {transport && <div className={styles.timeline} role="group" aria-label={t('review.timeline')}>
       <div className={styles.track} />
       {duration > 0 && markers.map(marker => {
-        const label = marker.triggerKind === 'integrity.change' ? (marker.poiId || 'ROI') : `#${marker.trackId}`
+        const label = marker.triggerKind === 'integrity.change' ? (marker.poiId || 'ROI')
+          : marker.triggerKind === 'cue.on'
+            ? `${marker.cueLabel || marker.cueId || 'C'} → ${marker.poiLabel || marker.poiId || 'POI'}`
+            : `#${marker.trackId}`
         return <button
           key={marker.resultId}
           type="button"

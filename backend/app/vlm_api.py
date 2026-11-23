@@ -5,6 +5,7 @@ import mimetypes
 import os
 import re
 import shutil
+import tempfile
 import threading
 import time
 import uuid
@@ -25,7 +26,16 @@ DATA_ROOT = Path(os.environ.get("VLM_DATA_ROOT", str(ROOT / "Rules/data/vlm"))).
 MAX_BYTES = int(os.environ.get("VLM_MAX_UPLOAD_BYTES", str(128 * 1024**3)))
 MAX_DURATION_SEC = float(os.environ.get("VLM_MAX_DURATION_SEC", "172800"))
 CHUNK_SIZE = 16 * 1024 * 1024
-ALLOWED_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm"}
+# Surveillance exports commonly use transport streams (.ts/.mts) and program
+# streams (.mpg/.mpeg); the browser cannot play them, but analysis and the
+# preview remux both read them natively.
+ALLOWED_SUFFIXES = {".mp4", ".mov", ".mkv", ".avi", ".m4v", ".webm",
+                    ".ts", ".mts", ".m2ts", ".mpg", ".mpeg"}
+# Explicit types: mimetypes maps .ts to a non-video type on common systems.
+SOURCE_TYPES = {".mp4": "video/mp4", ".m4v": "video/mp4", ".mov": "video/quicktime",
+                ".mkv": "video/x-matroska", ".avi": "video/x-msvideo", ".webm": "video/webm",
+                ".ts": "video/mp2t", ".mts": "video/mp2t", ".m2ts": "video/mp2t",
+                ".mpg": "video/mpeg", ".mpeg": "video/mpeg"}
 # Server-side file picker root for remote deployments: the browser must not open
 # a local file dialog for videos that already live on this machine.
 BROWSE_ROOT = Path(os.environ.get("VLM_BROWSE_ROOT", str(Path.home()))).expanduser().resolve()
@@ -192,6 +202,10 @@ class VideoImport(BaseModel):
     path: str = Field(min_length=1, max_length=2048)
 
 
+class FolderImport(BaseModel):
+    path: str = Field(min_length=1, max_length=2048)
+
+
 def _browse_root() -> Path:
     root = Path(BROWSE_ROOT).expanduser()
     try:
@@ -247,15 +261,24 @@ def browse(path: str = Query(default="", max_length=2048)):
             "dirs": dirs, "files": files, "truncated": len(dirs) + len(files) >= BROWSE_LIMIT}
 
 
-@router.post("/videos/import")
-def import_video(request: VideoImport):
-    """Register a server-side file as an uploaded video without any transfer.
+def _upload_index() -> dict[str, Path]:
+    """sha256 → existing upload folder, built once for a batch import."""
+    index: dict[str, Path] = {}
+    uploads = DATA_ROOT / "uploads"
+    if uploads.is_dir():
+        for existing in uploads.glob("*/video.json"):
+            try:
+                meta = read_json(existing)
+            except (OSError, ValueError):
+                continue
+            sha = str(meta.get("sha256") or "")
+            if len(sha) == 64 and (existing.parent / str(meta.get("sourceName", ""))).is_file():
+                index.setdefault(sha, existing.parent)
+    return index
 
-    Reuses an existing copy of the same content, hard-links when the file
-    already shares the uploads filesystem, and only falls back to a local copy
-    across devices; bytes never travel over the browser's connection.
-    """
-    source = _under_root(Path(request.path))
+
+def _import_source(source: Path, index: dict[str, Path]) -> dict:
+    """Register one server-side file, reusing identical content when present."""
     if not source.is_file():
         raise HTTPException(404, "Video file not found")
     if source.suffix.lower() not in ALLOWED_SUFFIXES:
@@ -270,14 +293,16 @@ def import_video(request: VideoImport):
         while chunk := stream.read(4 * 1024 * 1024):
             h.update(chunk)
     sha = h.hexdigest()
-    uploads = DATA_ROOT / "uploads"
-    if uploads.is_dir():
-        for existing in uploads.glob("*/video.json"):
-            meta = read_json(existing)
-            if meta.get("sha256") == sha and (existing.parent / str(meta.get("sourceName", ""))).is_file():
-                return {**meta, "reused": True}
+    existing = index.get(sha)
+    if existing is not None:
+        try:
+            meta = read_json(existing / "video.json")
+        except (OSError, ValueError):
+            meta = {}
+        if (existing / str(meta.get("sourceName", ""))).is_file():
+            return {**meta, "reused": True}
     video_id = uuid.uuid4().hex
-    dest = uploads / video_id
+    dest = DATA_ROOT / "uploads" / video_id
     dest.mkdir(parents=True)
     target = dest / f"source{source.suffix.lower()}"
     try:
@@ -289,7 +314,59 @@ def import_video(request: VideoImport):
     except Exception:
         shutil.rmtree(dest, ignore_errors=True)
         raise
+    index[sha] = dest
     return {**meta, "reused": False}
+
+
+@router.post("/videos/import")
+def import_video(request: VideoImport):
+    """Register a server-side file as an uploaded video without any transfer.
+
+    Reuses an existing copy of the same content, hard-links when the file
+    already shares the uploads filesystem, and only falls back to a local copy
+    across devices; bytes never travel over the browser's connection.
+    """
+    return _import_source(_under_root(Path(request.path)), _upload_index())
+
+
+@router.post("/videos/import-folder")
+def import_folder(request: FolderImport):
+    """Import every allowed video directly inside one server-side folder.
+
+    Batch recordings from one camera share the same frame geometry, so the
+    caller draws regions once. Subfolders are not walked; unreadable or invalid
+    files are reported individually and never abort the rest of the batch.
+    """
+    folder = _under_root(Path(request.path))
+    if not folder.is_dir():
+        raise HTTPException(400, "Not a directory")
+    try:
+        candidates = sorted(folder.iterdir(), key=lambda item: item.name.lower())
+    except OSError:
+        raise HTTPException(403, "Directory is not readable") from None
+    videos, errors = [], []
+    index = _upload_index()
+    truncated = False
+    for candidate in candidates:
+        if len(videos) + len(errors) >= BROWSE_LIMIT:
+            truncated = True
+            break
+        if candidate.name.startswith("."):
+            continue
+        try:
+            if not candidate.is_file() or candidate.suffix.lower() not in ALLOWED_SUFFIXES:
+                continue
+            source = _under_root(candidate)
+            meta = _import_source(source, index)
+            videos.append({"videoId": meta["videoId"],
+                           "fileName": meta.get("fileName") or source.name,
+                           "sizeBytes": meta.get("sizeBytes") or source.stat().st_size,
+                           "reused": bool(meta.get("reused"))})
+        except HTTPException as exc:
+            errors.append({"name": candidate.name, "error": str(exc.detail)})
+        except Exception as exc:
+            errors.append({"name": candidate.name, "error": str(exc)})
+    return {"folder": str(folder), "videos": videos, "errors": errors, "truncated": truncated}
 
 
 @router.post("/videos")
@@ -404,8 +481,43 @@ def source_video(video_id: str):
     meta = read_json(folder / "video.json")
     path = folder / meta["sourceName"]
     # Let the browser reuse already fetched ranges; uploads are immutable per videoId.
-    return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0] or "application/octet-stream",
+    media_type = SOURCE_TYPES.get(path.suffix.lower()) or mimetypes.guess_type(path.name)[0] \
+        or "application/octet-stream"
+    return FileResponse(path, media_type=media_type,
                         headers={"Cache-Control": "private, max-age=3600"})
+
+
+@router.get("/videos/{video_id}/thumbnail")
+def video_thumbnail(video_id: str):
+    """First decodable frame as JPEG, so regions can be drawn before a preview exists."""
+    folder = directory("uploads", video_id)
+    meta = read_json(folder / "video.json")
+    target = folder / "thumbnail.jpg"
+    if not target.is_file():
+        source = folder / str(meta.get("sourceName") or "")
+        if not source.is_file():
+            raise HTTPException(404, "Source video is missing")
+        try:
+            import av
+            with av.open(str(source)) as container:
+                if not container.streams.video:
+                    raise ValueError("No video stream")
+                frame = next(container.decode(container.streams.video[0]), None)
+                if frame is None:
+                    raise ValueError("No decodable frames")
+                image = frame.to_image().convert("RGB")
+                image.thumbnail((1920, 1920))
+                with tempfile.NamedTemporaryFile(dir=folder, suffix=".jpg.tmp", delete=False) as output:
+                    staged = Path(output.name)
+                try:
+                    image.save(staged, format="JPEG", quality=88)
+                    os.replace(staged, target)
+                finally:
+                    staged.unlink(missing_ok=True)
+        except Exception as exc:
+            raise HTTPException(422, f"Cannot extract the first frame: {exc}") from exc
+    return FileResponse(target, media_type="image/jpeg",
+                        headers={"Cache-Control": "private, max-age=86400"})
 
 
 @router.get("/runs")
@@ -458,6 +570,11 @@ def _start_run(request: RunRequest, snapshot: dict | None = None):
 def get_run(run_id: str):
     folder = directory("runs", run_id)
     result = vlm_jobs.status(folder)
+    # Same clock as the library list: from "start analysis" to finishedAt (or now).
+    started = result.get("startedAt")
+    if started is not None:
+        finished = result.get("finishedAt")
+        result["durationSec"] = max(0.0, (finished if finished is not None else time.time()) - started)
     if (folder / "request.json").exists():
         config = read_json(folder / "request.json")
         request = {**config.get("request", {})}
@@ -512,7 +629,8 @@ def results(run_id: str, offset: int = Query(default=0, ge=0), limit: int = Quer
         if "flag" not in skips and flagged and not (row.get("downgradeReasons") or row.get("qualityWarnings")):
             return False
         if needle:
-            haystack = f"{row.get('description', '')} {row.get('reason', '')} {row.get('trackId', '')}"
+            haystack = (f"{row.get('description', '')} {row.get('reason', '')} {row.get('trackId', '')} "
+                        f"{row.get('cueLabel', '')}")
             if needle not in haystack.casefold():
                 return False
         return True
@@ -551,7 +669,9 @@ def results(run_id: str, offset: int = Query(default=0, ge=0), limit: int = Quer
         rows.reverse()
     markers = [{"resultId": row.get("resultId"), "triggerSec": row.get("triggerSec") or 0,
                 "decision": row.get("decision"), "trackId": row.get("trackId"),
-                "poiId": row.get("poiId"), "triggerKind": row.get("triggerKind"),
+                "poiId": row.get("poiId"), "poiLabel": row.get("poiLabel"), "poiKind": row.get("poiKind"),
+                "cueId": row.get("cueId"), "cueLabel": row.get("cueLabel"),
+                "pairIndex": row.get("pairIndex"), "triggerKind": row.get("triggerKind"),
                 "inferenceStatus": row.get("inferenceStatus")} for row in rows]
     facets["flagged"] = flaggedTotal
     facets["total"] = allTotal

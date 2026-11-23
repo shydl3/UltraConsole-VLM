@@ -13,7 +13,7 @@ import { ServerVideoDialog } from '../widgets/ServerVideoDialog'
 import styles from './VideoTab.module.css'
 import { VlmPanel } from '../../vlm/VlmPanel'
 import { prepareVideoPreviewFromVideo } from '../../../utils/videoPreview'
-import { apiVlmMedia, type ServerVideo } from '../../../api/client'
+import { apiVlmMedia, apiVlmThumbnail, type ServerVideo } from '../../../api/client'
 
 export function VideoTab() {
   const t = useT()
@@ -27,12 +27,18 @@ export function VideoTab() {
   const pushLog = useConsoleStore((s) => s.pushLog)
 
   const videoRef = useRef<HTMLVideoElement | null>(null)
+  const stillRef = useRef<HTMLImageElement | null>(null)
   const captureCanvasRef = useRef<HTMLCanvasElement | null>(null)
   const abortRef = useRef<AbortController | null>(null)
   const pickedVideoRef = useRef<ServerVideo | null>(null)
   const previewAbortRef = useRef<AbortController | null>(null)
   const previewReleaseRef = useRef<(() => void) | null>(null)
-  const fallbackAttemptedRef = useRef(false)
+  const stillRequestRef = useRef('')
+  const usingPreviewRef = useRef(false)
+  const [stillUrl, setStillUrl] = useState('')
+  const [stillReady, setStillReady] = useState(false)
+  const [useStill, setUseStill] = useState(false)
+  const [needsPreview, setNeedsPreview] = useState(false)
   const [preparing, setPreparing] = useState(false)
   const [previewProgress, setPreviewProgress] = useState<number | null>(null)
   const reportRef = useRef<VideoReport | null>(null)
@@ -71,6 +77,11 @@ export function VideoTab() {
     return { ...lastPred, bboxes: roiFiltered }
   }, [lastPred, params.classFilter, roi.applyFilter, roi.polygon])
   const bboxes = useMemo(() => filteredPred?.bboxes ?? [], [filteredPred])
+  // Drawing overlays anchor to the still until the explicit preview is playable.
+  const overlayKey = `${selectedVideo?.videoId ?? 'none'}-${useStill ? `still-${stillReady}` : 'video'}`
+  const anchorRef = useStill ? stillRef : videoRef
+  // Drawing is valid on a loaded first frame even before a playable preview exists.
+  const stageReady = videoLoaded || (useStill && stillReady)
 
   // ROI 子菜单：点击外部或按 Esc 关闭；分析中自动收起
   const roiMenuVisible = roiMenuOpen && !running
@@ -179,8 +190,13 @@ export function VideoTab() {
     previewAbortRef.current = null
     previewReleaseRef.current?.()
     previewReleaseRef.current = null
-    fallbackAttemptedRef.current = false
     pickedVideoRef.current = video
+    stillRequestRef.current = ''
+    usingPreviewRef.current = false
+    setStillUrl('')
+    setStillReady(false)
+    setUseStill(false)
+    setNeedsPreview(false)
     setPreparing(false)
     setPreviewProgress(null)
     setVideoLoaded(false)
@@ -205,16 +221,34 @@ export function VideoTab() {
     }
   }
 
+  /** Browser cannot decode the source: show its first frame and let the user draw. */
   async function onDecodeError() {
     if (previewAbortRef.current) return
     setVideoLoaded(false)
     abortRef.current?.abort()
     const video = pickedVideoRef.current
-    if (!video || fallbackAttemptedRef.current || abortRef.current) {
+    if (!video) {
       setError(t('video.decodeError'))
       return
     }
-    fallbackAttemptedRef.current = true
+    setUseStill(true)
+    setNeedsPreview(true)
+    setStillReady(false)
+    setError('')
+    if (stillRequestRef.current === video.videoId) return
+    stillRequestRef.current = video.videoId
+    try {
+      const url = await apiVlmThumbnail(video.videoId)
+      if (pickedVideoRef.current === video) setStillUrl(url)
+    } catch (e) {
+      if (pickedVideoRef.current === video) setError(`${t('video.decodeError')} ${String(e)}`)
+    }
+  }
+
+  /** Explicit user action: build the playable preview (keeps the still visible meanwhile). */
+  async function generatePreview() {
+    const video = pickedVideoRef.current
+    if (!video || previewAbortRef.current) return
     const controller = new AbortController()
     previewAbortRef.current = controller
     setPreparing(true)
@@ -227,6 +261,7 @@ export function VideoTab() {
         return
       }
       previewReleaseRef.current = preview.release
+      usingPreviewRef.current = true
       videoRef.current.src = preview.url
       videoRef.current.load()
     } catch (error) {
@@ -290,19 +325,19 @@ export function VideoTab() {
           <NeoButton tone="danger" onClick={() => abortRef.current?.abort()}>{t('common.stop')}</NeoButton>
         )}
         <NeoButton onClick={exportReport} disabled={running || !report || report.frames === 0}>{t('video.exportReport')}</NeoButton>
-        <NeoButton onClick={() => edit('line')} disabled={running || !videoLoaded} className={editTool === 'line' ? styles.toolLine : undefined}>
+        <NeoButton onClick={() => edit('line')} disabled={running || !stageReady} className={editTool === 'line' ? styles.toolLine : undefined}>
           {t(editTool === 'line' ? 'video.finishEdit' : 'video.drawLine')}
         </NeoButton>
         <NeoButton onClick={flipEntryDirection} disabled={running || !eventsConfig.lines.length}>
           {t('video.entryDirection')}{lastLine?.entryDirection ? (lastLine.entryDirection === 'negative_to_positive' ? ' →' : ' ←') : ` (${t('video.entryBoth')})`}
         </NeoButton>
-        <NeoButton onClick={() => edit('zone')} disabled={running || !videoLoaded} className={editTool === 'zone' ? styles.toolZone : undefined}>
+        <NeoButton onClick={() => edit('zone')} disabled={running || !stageReady} className={editTool === 'zone' ? styles.toolZone : undefined}>
           {t(editTool === 'zone' ? 'video.finishEdit' : 'video.drawZone')}
         </NeoButton>
-        <NeoButton onClick={() => edit('cue')} disabled={running || !videoLoaded} className={editTool === 'cue' ? styles.toolCue : undefined}>
+        <NeoButton onClick={() => edit('cue')} disabled={running || !stageReady} className={editTool === 'cue' ? styles.toolCue : undefined}>
           {t(editTool === 'cue' ? 'video.finishEdit' : 'video.drawCue')}
         </NeoButton>
-        <NeoButton onClick={() => edit('integrity')} disabled={running || !videoLoaded} className={editTool === 'integrity' ? styles.toolIntegrity : undefined}>
+        <NeoButton onClick={() => edit('integrity')} disabled={running || !stageReady} className={editTool === 'integrity' ? styles.toolIntegrity : undefined}>
           {t(editTool === 'integrity' ? 'video.finishEdit' : 'video.drawIntegrity')}
         </NeoButton>
         <NeoButton disabled={running || (!eventsConfig.lines.length && !eventsConfig.zones.length && !(eventsConfig.cues?.length) && !(eventsConfig.integrity?.length))} onClick={() => {
@@ -338,8 +373,8 @@ export function VideoTab() {
           </NeoButton>
           {roiMenuVisible && (
             <div className={styles.roiPop} role="menu" aria-label={t('common.editRoi')}>
-              {!videoLoaded && <div className={styles.roiHint}>{t('common.roiNeedVideo')}</div>}
-              <NeoButton role="menuitem" className={roi.enabled ? styles.roiActive : undefined} disabled={!videoLoaded || running} onClick={() => { setEditTool('none'); setRoi({ enabled: !roi.enabled }) }}>
+              {!stageReady && <div className={styles.roiHint}>{t('common.roiNeedVideo')}</div>}
+              <NeoButton role="menuitem" className={roi.enabled ? styles.roiActive : undefined} disabled={!stageReady || running} onClick={() => { setEditTool('none'); setRoi({ enabled: !roi.enabled }) }}>
                 ROI{roi.enabled ? ' · on' : ''}
               </NeoButton>
               <NeoButton role="menuitem" onClick={() => setRoi({ mode: roi.mode === 'rect' ? 'poly' : 'rect' })} disabled={!roi.enabled}>
@@ -382,6 +417,10 @@ export function VideoTab() {
         {t(`video.${report.status}`)} · {formatVideoTime(report.analyzedSeconds)} / {formatVideoTime(report.duration)} · {report.frames} {t('video.frames')} · {report.events.length} {t('video.events')}
       </div>}
       {error && <div role="alert">{error}</div>}
+      {needsPreview && <div className={styles.previewBar}>
+        <span>{t('video.previewNeeded')}</span>
+        <NeoButton onClick={() => void generatePreview()} disabled={preparing}>{t('video.generatePreview')}</NeoButton>
+      </div>}
       {preparing && <div role="status" className={styles.meta}>
         {previewProgress === null ? t('video.preparingUpload') : `${t('video.preparingConvert')} ${previewProgress}%`}
         {' '}<NeoButton onClick={() => {
@@ -392,26 +431,43 @@ export function VideoTab() {
         }}>{t('common.stop')}</NeoButton>
       </div>}
       <div className={styles.stage}>
-        <video ref={videoRef} className={styles.video} controls={!running} playsInline
+        <video ref={videoRef} className={styles.video} controls={!running && !useStill} playsInline
           onLoadedData={() => {
             const v = videoRef.current
             const hasDuration = Number.isFinite(v?.duration) && (v?.duration ?? 0) > 0
             const decodable = (v?.videoWidth ?? 0) > 0 && (v?.videoHeight ?? 0) > 0
             setVideoLoaded(hasDuration && decodable)
             // 浏览器读得出时长却解不出画面（如 Linux 下无 HEVC 硬解）时不会触发 error 事件，
-            // 这里主动转入 GPU 兼容预览回退，避免黑屏预览与空帧分析。
-            if (hasDuration && !decodable) void onDecodeError()
+            // 这里主动切到首帧绘制模式，等用户点击“生成预览”再做转换。
+            if (hasDuration && !decodable) { void onDecodeError(); return }
+            if (decodable && usingPreviewRef.current) {
+              usingPreviewRef.current = false
+              setUseStill(false)
+              setNeedsPreview(false)
+              setStillReady(false)
+            }
           }}
           onError={() => void onDecodeError()}
           onPlay={() => { if (abortRef.current) videoRef.current?.pause(); else setLastPred(undefined) }}
           onSeeking={() => { if (!abortRef.current) setLastPred(undefined) }}
         />
-        <VideoCanvasOverlay videoRef={videoRef} pred={filteredPred} showBBox={osd.bbox} showLabels={osd.labels} />
-        <RoiOverlay anchorRef={videoRef} />
-        <EventEditOverlay ref={editOverlayRef} key={editTool} anchorRef={videoRef} enabled={editTool !== 'none'} mode={editTool === 'none' ? 'line' : editTool} />
+        {useStill && stillUrl && <img ref={stillRef} className={styles.still} src={stillUrl}
+          alt={t('video.firstFrameAlt')}
+          onLoad={() => {
+            setStillReady(true)
+            // The overlays observe resize; nudge them once the natural size is known.
+            window.dispatchEvent(new Event('resize'))
+          }}
+          onError={() => setError(t('video.decodeError'))}
+        />}
+        {useStill && !stillUrl && <div className={styles.stillHint}>{t('video.loadingFirstFrame')}</div>}
+        {!useStill && <VideoCanvasOverlay videoRef={videoRef} pred={filteredPred} showBBox={osd.bbox} showLabels={osd.labels} />}
+        <RoiOverlay key={`roi-${overlayKey}`} anchorRef={anchorRef} />
+        <EventEditOverlay ref={editOverlayRef} key={`edit-${editTool}-${overlayKey}`} anchorRef={anchorRef} enabled={editTool !== 'none'} mode={editTool === 'none' ? 'line' : editTool} />
         <TelemetryHUD telemetry={filteredPred?.telemetry} />
       </div>
-      <VlmPanel video={selectedVideo} eventsConfig={eventsConfig} basicRunning={running || preparing} onBusyChange={setSemanticBusy} />
+      <VlmPanel video={selectedVideo} eventsConfig={eventsConfig} basicRunning={running || preparing} onBusyChange={setSemanticBusy}
+        onSelectVideo={next => void onPick(next)} />
       {browserOpen && <ServerVideoDialog multiple={false} onClose={() => setBrowserOpen(false)} onPicked={videos => {
         setBrowserOpen(false)
         if (videos[0]) void onPick(videos[0])

@@ -24,8 +24,10 @@
   border-radius: 0;
   z-index: 1;
 }
-.dialog button, .dialog input, .dialog select { font: inherit; }
-.dialog button, .dialog select {
+/* :where() keeps this reset at class specificity, so semantic buttons
+   (.tick timeline marks, .cardTitle, .coverageName, ...) can override it. */
+.dialog :where(button, input, select) { font: inherit; }
+.dialog :where(button, select) {
   border: 1px solid var(--line-0);
   border-radius: 6px;
   background: var(--panel-0);
@@ -33,8 +35,8 @@
   padding: 6px 10px;
   cursor: pointer;
 }
-.dialog button:hover:not(:disabled) { border-color: var(--accent-blue); }
-.dialog button:disabled { opacity: .4; cursor: not-allowed; }
+.dialog :where(button:hover:not(:disabled)) { border-color: var(--accent-blue); }
+.dialog :where(button:disabled) { opacity: .4; cursor: not-allowed; }
 .dialog input:not([type=checkbox]) {
   background: var(--bg-1);
   color: var(--fg-0);
@@ -46,18 +48,24 @@
 .dialog :focus-visible { outline: 2px solid var(--accent-blue); outline-offset: 2px; }
 
 .shell { display: grid; grid-template-rows: auto minmax(0, 1fr); height: 100%; }
-.header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--line-0); }
-.headingRow { display: flex; align-items: center; gap: 10px; min-width: 0; }
-.headingRow h2 { margin: 0; font-size: 17px; overflow-wrap: anywhere; }
+.header { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; row-gap: 8px; padding: 14px 18px; border-bottom: 1px solid var(--line-0); }
+.headingRow { display: flex; align-items: center; flex-wrap: wrap; gap: 10px; row-gap: 6px; min-width: 0; }
+.headingRow h2 { margin: 0; font-size: 17px; overflow-wrap: anywhere; min-width: 0; }
+/* Programmatic focus for screen readers; the default focus ring around a long
+   filename looks like a stray input box. */
+.headingRow h2:focus { outline: none; }
 .muted { color: var(--fg-2); font-size: 12px; overflow-wrap: anywhere; }
 .stateChip { padding: 3px 8px; border-radius: 5px; font-size: 11px; background: rgba(255, 255, 255, .06); color: var(--fg-1); white-space: nowrap; }
-.actions { display: flex; align-items: center; gap: 8px; }
+.duration { display: inline-flex; align-items: center; gap: 4px; padding: 3px 8px; border-radius: 5px; font-size: 11px; color: var(--fg-1); background: rgba(255, 255, 255, .06); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.actions { display: flex; align-items: center; flex-wrap: wrap; justify-content: flex-end; gap: 8px; }
 .close { font-size: 18px; line-height: 1; padding: 2px 9px; }
 
 .layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(380px, 46%); min-height: 0; }
 .layoutSingle { grid-template-columns: minmax(0, 1fr); }
 .left { padding: 16px; overflow: auto; border-right: 1px solid var(--line-0); min-width: 0; }
-.right { display: grid; grid-template-rows: auto minmax(0, 1fr) auto; min-height: 0; min-width: 0; }
+/* Four children: coverage, filters, results, pager. The filters must keep
+   their natural height; results take the remaining space and scroll. */
+.right { display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto; min-height: 0; min-width: 0; }
 
 .video { width: 100%; max-height: 56vh; background: #000; border-radius: 8px; display: block; }
 .transport { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin-top: 10px; }
@@ -74,7 +82,7 @@
 .failed { background: #9aa7b8; }
 .dry_run { background: #7fa8ff; }
 
-.filters { display: grid; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line-0); }
+.filters { display: grid; gap: 8px; padding: 12px 16px; border-bottom: 1px solid var(--line-0); min-width: 0; }
 .chips { display: flex; flex-wrap: wrap; gap: 6px; }
 /* Scoped under .dialog so the pill outranks the generic `.dialog button` reset
    (font: inherit / 6px padding / 6px radius) that otherwise inflates the chip. */
@@ -84,14 +92,16 @@
 .dialog .chipActive strong { color: var(--accent-blue); }
 .fields { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
 .fields input[type=search] { flex: 1; min-width: 160px; }
-.fields label { display: inline-flex; align-items: center; gap: 6px; color: var(--fg-2); font-size: 12px; }
+.fields label { display: inline-flex; align-items: center; gap: 6px; min-width: 0; color: var(--fg-2); font-size: 12px; }
+/* Long user-defined rule names must not squeeze the search box out of the row. */
+.fields select { min-width: 0; max-width: 240px; }
 
 .results { overflow: auto; padding: 8px 16px 16px; min-height: 0; }
 .list { display: grid; gap: 10px; }
 .card { border: 1px solid var(--line-0); border-radius: 10px; padding: 10px 12px; display: grid; gap: 6px; background: var(--bg-1); scroll-margin: 12px; }
 .cardActive { border-color: var(--accent-blue); background: #152329; }
-.cardHead { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
-.cardTitle { padding: 0; border: 0; background: none; text-align: left; font-size: 13px; font-weight: 500; color: var(--fg-0); cursor: pointer; overflow-wrap: anywhere; }
+.cardHead { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
+.cardTitle { padding: 0; border: 0; background: none; text-align: left; font-size: 13px; font-weight: 500; color: var(--fg-0); cursor: pointer; overflow-wrap: anywhere; min-width: 0; flex: 1 1 auto; }
 .cardTitle:hover { color: var(--accent-blue); }
 .cardMeta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; font-size: 12px; color: var(--fg-2); }
 .badge { padding: 3px 8px; border-radius: 5px; font-size: 11px; white-space: nowrap; color: #12181f; font-weight: 500; }
@@ -108,7 +118,7 @@
 .integrityFig .evidence { margin-top: 0; max-width: none; border: 1px solid rgba(255, 193, 7, .35); }
 @media (max-width: 640px) { .integrityGrid { grid-template-columns: 1fr; } }
 .error { color: #ff8585; font-size: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
-.coverage { display: grid; gap: 6px; padding: 10px 12px; border: 1px solid var(--line-0); border-radius: 10px; background: rgba(255, 255, 255, 0.03); }
+.coverage { display: grid; gap: 6px; margin: 10px 16px 0; padding: 10px 12px; border: 1px solid var(--line-0); border-radius: 10px; background: rgba(255, 255, 255, 0.03); }
 .coverage > strong { font-size: 12px; color: var(--fg-1); }
 .coverage ul { list-style: none; margin: 0; padding: 0; display: grid; gap: 6px; }
 .coverageRow { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
@@ -130,7 +140,16 @@
 
 @media (max-width: 1100px) {
   .dialog { width: calc(100vw - 16px); height: calc(100vh - 16px); }
-  .layout { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
-  .left { border-right: 0; border-bottom: 1px solid var(--line-0); }
+  /* Single column: scroll the whole review body instead of squeezing the
+     result list into a few pixels below the tall video/parameters block. */
+  .layout { display: block; overflow-y: auto; min-height: 0; }
+  .left { border-right: 0; border-bottom: 1px solid var(--line-0); overflow: visible; }
+  .right { display: grid; grid-template-rows: auto auto auto auto; }
+  .results { overflow: visible; }
   .video { max-height: 38vh; }
+}
+
+@media (max-width: 720px) {
+  .header { grid-template-columns: minmax(0, 1fr); }
+  .actions { justify-content: flex-start; }
 }

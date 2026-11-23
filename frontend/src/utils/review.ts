@@ -20,6 +20,11 @@ export type ReviewMarker = {
   decision: string
   trackId: number | null
   poiId?: string
+  poiLabel?: string
+  poiKind?: string
+  cueId?: string
+  cueLabel?: string
+  pairIndex?: number | null
   triggerKind?: string
   inferenceStatus?: string
 }

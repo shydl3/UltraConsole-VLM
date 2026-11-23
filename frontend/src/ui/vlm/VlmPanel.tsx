@@ -17,8 +17,9 @@ import { TaskQueue } from './TaskQueue'
 
 const fileKey = (file: ServerVideo) => `${file.name}:${file.size}:${file.videoId}`
 
-export function VlmPanel({ video, eventsConfig, basicRunning, onBusyChange }: {
-  video: ServerVideo | null; eventsConfig: EventsConfig; basicRunning: boolean; onBusyChange: (busy: boolean) => void
+export function VlmPanel({ video, eventsConfig, basicRunning, onBusyChange, onSelectVideo }: {
+  video: ServerVideo | null; eventsConfig: EventsConfig; basicRunning: boolean
+  onBusyChange: (busy: boolean) => void; onSelectVideo?: (video: ServerVideo) => void
 }) {
   const t = useT()
   const rulesRef = useRef<RulesEditorHandle>(null)
@@ -26,6 +27,7 @@ export function VlmPanel({ video, eventsConfig, basicRunning, onBusyChange }: {
   const [snapshot, setSnapshot] = useState<RuleSnapshot | null>(null)
   const [batch, setBatch] = useState<ServerVideo[]>([])
   const [browserOpen, setBrowserOpen] = useState(false)
+  const [browserMode, setBrowserMode] = useState<'files' | 'folder'>('files')
   const [submissions, setSubmissions] = useState<VlmTask[]>([])
   const [queueVersion, setQueueVersion] = useState(0)
   const [queueBusy, setQueueBusy] = useState(false)
@@ -96,6 +98,16 @@ export function VlmPanel({ video, eventsConfig, basicRunning, onBusyChange }: {
     })
   }
 
+  function addFolder(picked: ServerVideo[]) {
+    setBrowserOpen(false)
+    addVideos(picked)
+    // Drawing happens on the console video. When a batch folder is imported,
+    // load its first recording unless the current video already belongs to it.
+    if (picked.length && onSelectVideo && (!video || !picked.some(item => fileKey(item) === fileKey(video)))) {
+      onSelectVideo(picked[0])
+    }
+  }
+
   function removeFile(target: ServerVideo) {
     setBatch(previous => previous.filter(item => fileKey(item) !== fileKey(target)))
   }
@@ -144,7 +156,7 @@ export function VlmPanel({ video, eventsConfig, basicRunning, onBusyChange }: {
   }
 
   const pois = vlmPois(eventsConfig)
-  const cues = vlmCues(eventsConfig).map(c => ({ id: c.id, label: c.label, kind: 'cue' }))
+  const cues = vlmCues(eventsConfig).map(c => ({ id: c.id, label: c.label, kind: 'cue', pairIndex: c.pairIndex }))
   const integrity = vlmIntegrity(eventsConfig).map(z => ({ id: z.id, label: z.label, kind: 'integrity' }))
   return <section className={styles.panel} aria-label={t('vlm.title')}>
     <strong>{t('vlm.title')}</strong>
@@ -156,8 +168,11 @@ export function VlmPanel({ video, eventsConfig, basicRunning, onBusyChange }: {
     <div className={styles.files}>
       <div className={styles.toolbar}>
         <strong>{t('vlm.batchTitle')}</strong>
-        <button type="button" disabled={submitting} onClick={() => setBrowserOpen(true)}>
+        <button type="button" disabled={submitting} onClick={() => { setBrowserMode('files'); setBrowserOpen(true) }}>
           {t('vlm.batchAdd')}
+        </button>
+        <button type="button" disabled={submitting} onClick={() => { setBrowserMode('folder'); setBrowserOpen(true) }}>
+          {t('vlm.batchFolder')}
         </button>
         <span className={styles.hint}>{t('vlm.batchCount', { count: files.length })}</span>
       </div>
@@ -199,9 +214,14 @@ export function VlmPanel({ video, eventsConfig, basicRunning, onBusyChange }: {
       <button disabled={!runId} onClick={() => openRecord(runId)}>{t('review.open')}</button>
       <span className={styles.hint}>{run?.summary?.resultCount != null ? t('library.resultCount', { count: run.summary.resultCount }) : t('review.hint')}</span>
     </div>
-    {browserOpen && <ServerVideoDialog multiple onClose={() => setBrowserOpen(false)} onPicked={picked => {
-      setBrowserOpen(false)
-      addVideos(picked)
-    }} />}
+    {browserOpen && <ServerVideoDialog
+      multiple={browserMode === 'files'}
+      folderImport={browserMode === 'folder'}
+      onClose={() => setBrowserOpen(false)}
+      onPicked={picked => {
+        if (browserMode === 'folder') addFolder(picked)
+        else { setBrowserOpen(false); addVideos(picked) }
+      }}
+    />}
   </section>
 }

@@ -41,10 +41,10 @@ export type SystemStats = {
 }
 
 export type RoiPointXY = { x: number; y: number }
-export type CountingLine = { id: string; name?: string; a: RoiPointXY; b: RoiPointXY; entryDirection?: 'positive_to_negative' | 'negative_to_positive' | null }
-export type CountingZone = { id: string; name?: string; polygon: RoiPointXY[] }
+export type CountingLine = { id: string; name?: string; pairIndex?: number; a: RoiPointXY; b: RoiPointXY; entryDirection?: 'positive_to_negative' | 'negative_to_positive' | null }
+export type CountingZone = { id: string; name?: string; pairIndex?: number; polygon: RoiPointXY[] }
 export type SignalRegion = {
-  id: string; name?: string; polygon: RoiPointXY[]
+  id: string; name?: string; pairIndex?: number; polygon: RoiPointXY[]
   minOnRatio?: number; minR?: number; minRG?: number; minRB?: number
   minOnSec?: number; minOffSec?: number; sampleFps?: number
 }

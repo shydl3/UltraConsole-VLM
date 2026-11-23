@@ -1,8 +1,30 @@
 import { forwardRef, useEffect, useImperativeHandle, useRef, useState, type ReactNode } from 'react'
 import { apiVlm } from '../../api/client'
 import { useT } from '../../i18n'
-import { bindingError, newRule, newRuleId, parseRuleImport, PRESET_RULE_ID, presetRule, ruleChanged, ruleError, rulePayload, triggerKinds, type EventRule, type RuleLibrary, type RulePoi, type RuleSelection } from '../../utils/eventRules'
+import { bindingError, categoryTriggers, newRule, newRuleId, parseRuleImport, PRESET_RULE_ID, presetRule, ruleCategories, ruleChanged, ruleError, rulePayload, triggerKinds, type EventRule, type RuleLibrary, type RulePoi, type RuleSelection } from '../../utils/eventRules'
+import type { RuleCategory } from '../../utils/vlm'
 import styles from './EventRulesEditor.module.css'
+
+const toggleIds = (ids: string[], changes: (string | undefined)[], enabled: boolean) => {
+  const next = new Set(ids)
+  for (const id of changes) {
+    if (!id) continue
+    if (enabled) next.add(id)
+    else next.delete(id)
+  }
+  return [...next]
+}
+
+const pairChannels = (pois: RulePoi[], cues: RulePoi[]) => {
+  const lines = pois.filter(poi => poi.kind === 'line' && poi.pairIndex != null)
+  const channels = lines.map(line => ({
+    line,
+    zone: pois.find(poi => poi.kind === 'zone' && poi.pairIndex === line.pairIndex),
+    cue: cues.find(cue => cue.pairIndex === line.pairIndex),
+  }))
+  const orphanCues = cues.filter(cue => cue.pairIndex != null && !lines.some(line => line.pairIndex === cue.pairIndex))
+  return { channels, orphanCues }
+}
 
 const withPreset = (rows: EventRule[]) => rows.some(r => r.id === PRESET_RULE_ID) ? rows : [...rows, presetRule()]
 
@@ -36,7 +58,7 @@ export const EventRulesEditor = forwardRef<RulesEditorHandle, { pois: RulePoi[];
   const saved = new Map(library?.rules.map(row => [row.id, row]))
   const dirty = rows.filter(row => ruleChanged(row, saved.get(row.id)))
   const enabled = rows.filter(row => row.enabled)
-  const ready = !!library && enabled.length > 0 && enabled.length <= 30 && enabled.every(row => !ruleError(row) && (row.id === PRESET_RULE_ID || (!bindingError(row, bindings[row.id] || [], pois, integrity) && (cueBindings[row.id] || []).every(id => cues.some(c => c.id === id)) && (integrityBindings[row.id] || []).every(id => integrity.some(z => z.id === id)))))
+  const ready = !!library && enabled.length > 0 && enabled.length <= 30 && enabled.every(row => !ruleError(row) && (row.id === PRESET_RULE_ID || (!bindingError(row, bindings[row.id] || [], pois, integrity, cueBindings[row.id] || [], cues) && (cueBindings[row.id] || []).every(id => cues.some(c => c.id === id)) && (integrityBindings[row.id] || []).every(id => integrity.some(z => z.id === id)))))
 
   useEffect(() => {
     const controller = new AbortController()
@@ -139,18 +161,37 @@ export const EventRulesEditor = forwardRef<RulesEditorHandle, { pois: RulePoi[];
     </tr></thead><tbody>{filtered.map(row => {
       const changed = ruleChanged(row, saved.get(row.id))
       const isPreset = row.id === PRESET_RULE_ID
-      const problem = ruleError(row) || (!isPreset && row.enabled && (pois.length || integrity.length || bindings[row.id]?.length) ? bindingError(row, bindings[row.id] || [], pois, integrity) : '')
+      const forced = row.category === 'forced_passage'
+      const { channels, orphanCues } = pairChannels(pois, cues)
+      const bound = bindings[row.id] || []
+      const boundCues = cueBindings[row.id] || []
+      const selectedChannels = channels.filter(channel => bound.includes(channel.line.id)).length
+      const problem = ruleError(row) || (!isPreset && row.enabled ? bindingError(row, bound, pois, integrity, boundCues, cues) : '')
       return <tr key={row.id} data-rule-id={row.id}>
         <td><input type="checkbox" aria-label={`${t('eventRules.select')} ${row.name}`} disabled={busy} checked={selected.includes(row.id)} onChange={e => setSelected(previous => e.target.checked ? [...previous, row.id] : previous.filter(id => id !== row.id))} /></td>
         <td><input type="checkbox" role="switch" aria-label={`${t('eventRules.enabled')} ${row.name}`} disabled={busy || isPreset} checked={row.enabled} onChange={e => stage({ ...row, enabled: e.target.checked })} /></td>
-        <td className={styles.definition}><strong>{row.name || t('eventRules.untitled')}{isPreset && <span className={styles.hint}> · {t('eventRules.preset')}</span>}</strong><p>{row.description}</p><span className={styles.hint}>{row.triggerKinds.map(k => t(`eventRules.${k}`)).join(' / ')} · −{row.preSeconds}s / +{row.postSeconds}s</span>{problem && <p className={styles.error}>{problem}</p>}</td>
-        <td>{isPreset ? <span className={styles.hint}>—</span> : <details><summary>{bindings[row.id]?.length ? t('eventRules.poiCount', { count: bindings[row.id].length }) : t('eventRules.allPoi')}</summary>
+        <td className={styles.definition}><strong>{row.name || t('eventRules.untitled')}{isPreset && <span className={styles.hint}> · {t('eventRules.preset')}</span>}</strong><p>{row.description}</p><span className={styles.hint}>{t(`eventRules.category.${row.category}`)} · {row.triggerKinds.map(k => t(`eventRules.${k}`)).join(' / ')} · −{row.preSeconds}s / +{row.postSeconds}s</span>{problem && <p className={styles.error}>{problem}</p>}</td>
+        <td>{isPreset ? <span className={styles.hint}>—</span> : forced ? <details><summary>{selectedChannels ? t('eventRules.pairSelected', { count: selectedChannels }) : t('eventRules.allPairs')}</summary>
+          <button disabled={busy} onClick={() => { setBindings(previous => ({ ...previous, [row.id]: [] })); setCueBindings(previous => ({ ...previous, [row.id]: [] })) }}>{t('eventRules.allPairs')}</button>
+          {!channels.length && <p className={styles.hint}>{t('eventRules.pairNone')}</p>}
+          {channels.map(channel => <label className={styles.poi} key={channel.line.id}>
+            <input type="checkbox" disabled={busy} checked={bound.includes(channel.line.id)} onChange={e => {
+              setBindings(previous => ({ ...previous, [row.id]: toggleIds(previous[row.id] || [], [channel.line.id, channel.zone?.id], e.target.checked) }))
+              setCueBindings(previous => ({ ...previous, [row.id]: toggleIds(previous[row.id] || [], [channel.cue?.id], e.target.checked) }))
+            }} />
+            {t('eventRules.pairChannel', { index: channel.line.pairIndex ?? '?', line: channel.line.label, cue: channel.cue?.label ?? t('eventRules.pairMissingCue') })}
+            {channel.zone ? ` · ${t('eventRules.pairZoneOptional', { zone: channel.zone.label })}` : ''}
+            {!channel.cue ? ` · ${t('eventRules.pairMissingCue')}` : ''}
+            {!channel.line.entryDirection ? ` · ${t('eventRules.pairNoDirection')}` : ''}
+          </label>)}
+          {orphanCues.map(cue => <p className={styles.error} key={cue.id}>{t('eventRules.pairOrphanCue', { cue: cue.label, index: cue.pairIndex ?? '?' })}</p>)}
+        </details> : <details><summary>{bound.length ? t('eventRules.poiCount', { count: bound.length }) : t('eventRules.allPoi')}</summary>
           <button disabled={busy} onClick={() => setBindings(previous => ({ ...previous, [row.id]: [] }))}>{t('eventRules.allPoi')}</button>
-          {Array.from(new Set([...pois.map(p => p.id), ...(bindings[row.id] || [])])).map(id => <label className={styles.poi} key={id}><input type="checkbox" disabled={busy} checked={(bindings[row.id] || []).includes(id)} onChange={e => setBindings(previous => ({ ...previous, [row.id]: e.target.checked ? [...(previous[row.id] || []), id] : (previous[row.id] || []).filter(p => p !== id) }))} />{pois.find(p => p.id === id)?.label || id}{!pois.some(p => p.id === id) ? ` (${t('eventRules.missing')})` : ''}</label>)}
+          {Array.from(new Set([...pois.map(p => p.id), ...bound])).map(id => <label className={styles.poi} key={id}><input type="checkbox" disabled={busy} checked={bound.includes(id)} onChange={e => setBindings(previous => ({ ...previous, [row.id]: e.target.checked ? [...(previous[row.id] || []), id] : (previous[row.id] || []).filter(p => p !== id) }))} />{pois.find(p => p.id === id)?.label || id}{!pois.some(p => p.id === id) ? ` (${t('eventRules.missing')})` : ''}</label>)}
         </details>}</td>
-        <td>{isPreset ? <span className={styles.hint}>—</span> : <details><summary>{cueBindings[row.id]?.length ? t('eventRules.cueCount', { count: cueBindings[row.id].length }) : t('eventRules.allCue')}</summary>
+        <td>{isPreset ? <span className={styles.hint}>—</span> : forced ? <span className={styles.hint}>{t('eventRules.managedByPairs')}</span> : <details><summary>{boundCues.length ? t('eventRules.cueCount', { count: boundCues.length }) : t('eventRules.allCue')}</summary>
           <button disabled={busy} onClick={() => setCueBindings(previous => ({ ...previous, [row.id]: [] }))}>{t('eventRules.allCue')}</button>
-          {Array.from(new Set([...cues.map(c => c.id), ...(cueBindings[row.id] || [])])).map(id => <label className={styles.poi} key={id}><input type="checkbox" disabled={busy} checked={(cueBindings[row.id] || []).includes(id)} onChange={e => setCueBindings(previous => ({ ...previous, [row.id]: e.target.checked ? [...(previous[row.id] || []), id] : (previous[row.id] || []).filter(c => c !== id) }))} />{cues.find(c => c.id === id)?.label || id}{!cues.some(c => c.id === id) ? ` (${t('eventRules.missing')})` : ''}</label>)}
+          {Array.from(new Set([...cues.map(c => c.id), ...boundCues])).map(id => <label className={styles.poi} key={id}><input type="checkbox" disabled={busy} checked={boundCues.includes(id)} onChange={e => setCueBindings(previous => ({ ...previous, [row.id]: e.target.checked ? [...(previous[row.id] || []), id] : (previous[row.id] || []).filter(c => c !== id) }))} />{cues.find(c => c.id === id)?.label || id}{!cues.some(c => c.id === id) ? ` (${t('eventRules.missing')})` : ''}</label>)}
         </details>}</td>
         <td>{isPreset ? <span className={styles.hint}>{t('eventRules.presetAutoBind')}</span> : <details><summary>{integrityBindings[row.id]?.length ? t('eventRules.integrityCount', { count: integrityBindings[row.id].length }) : t('eventRules.allIntegrity')}</summary>
           <button disabled={busy} onClick={() => setIntegrityBindings(previous => ({ ...previous, [row.id]: [] }))}>{t('eventRules.allIntegrity')}</button>
@@ -171,10 +212,16 @@ export const EventRulesEditor = forwardRef<RulesEditorHandle, { pois: RulePoi[];
     {edit && <Dialog title={t('eventRules.edit')} close={() => setEdit(null)}><form onSubmit={e => { e.preventDefault(); const clean = { ...edit, criteria: edit.criteria.map(s => s.trim()).filter(Boolean), uncertainWhen: edit.uncertainWhen.map(s => s.trim()).filter(Boolean) }; const problem = ruleError(clean); if (problem) { setModalError(problem); return }; stage(clean); setEdit(null) }}>
       <label>{t('eventRules.name')}<input autoFocus required maxLength={160} value={edit.name} onChange={e => setEdit({ ...edit, name: e.target.value })} /></label>
       <label>{t('eventRules.description')}<textarea required maxLength={1500} value={edit.description} onChange={e => setEdit({ ...edit, description: e.target.value })} /></label>
+      <label>{t('eventRules.category')}<select value={edit.category} onChange={e => {
+        const category = e.target.value as RuleCategory
+        setEdit({ ...edit, category, triggerKinds: categoryTriggers(category), preSeconds: category === 'forced_passage' && edit.preSeconds < 8 ? 8 : edit.preSeconds })
+      }}>{ruleCategories.map(category => <option key={category} value={category}>{t(`eventRules.category.${category}`)}</option>)}</select></label>
+      <p className={styles.hint}>{t(`eventRules.categoryHint.${edit.category}`)}</p>
       <label className={styles.poi}><input type="checkbox" checked={edit.enabled} onChange={e => setEdit({ ...edit, enabled: e.target.checked })} />{t('eventRules.enabled')}</label>
+      <div className={styles.toolbar}>{(['preSeconds', 'postSeconds'] as const).map(key => <label key={key}>{t(`eventRules.${key}`)}<input type="number" min={0} max={60} step={0.1} value={edit[key]} onChange={e => setEdit({ ...edit, [key]: Number(e.target.value) })} /></label>)}</div>
       <details><summary>{t('eventRules.advanced')}</summary>
-        <fieldset><legend>{t('eventRules.triggers')}</legend>{triggerKinds.map(kind => <label className={styles.poi} key={kind}><input type="checkbox" checked={edit.triggerKinds.includes(kind)} onChange={e => setEdit({ ...edit, triggerKinds: e.target.checked ? [...edit.triggerKinds, kind] : edit.triggerKinds.filter(k => k !== kind) })} />{t(`eventRules.${kind}`)}</label>)}</fieldset>
-        <div className={styles.toolbar}>{(['preSeconds', 'postSeconds'] as const).map(key => <label key={key}>{t(`eventRules.${key}`)}<input type="number" min={0} max={60} step={0.1} value={edit[key]} onChange={e => setEdit({ ...edit, [key]: Number(e.target.value) })} /></label>)}</div>
+        {edit.category === 'poi_event' ? <fieldset><legend>{t('eventRules.triggers')}</legend>{triggerKinds.filter(kind => kind !== 'cue.on' && kind !== 'integrity.change').map(kind => <label className={styles.poi} key={kind}><input type="checkbox" checked={edit.triggerKinds.includes(kind)} onChange={e => setEdit({ ...edit, triggerKinds: e.target.checked ? [...edit.triggerKinds, kind] : edit.triggerKinds.filter(k => k !== kind) })} />{t(`eventRules.${kind}`)}</label>)}</fieldset> : <p className={styles.hint}>{t('eventRules.presetTriggers')}</p>}
+        {edit.category === 'forced_passage' && <label>{t('eventRules.cueDedupe')}<input type="number" min={0} max={60} step={0.1} value={edit.cueDedupeSec} onChange={e => setEdit({ ...edit, cueDedupeSec: Number(e.target.value) })} /></label>}
         {(['criteria', 'uncertainWhen'] as const).map(key => <label key={key}>{t(`eventRules.${key}`)}<textarea value={edit[key].join('\n')} onChange={e => setEdit({ ...edit, [key]: e.target.value.split('\n') })} /></label>)}
       </details>
       {modalError && <p role="alert" className={styles.error}>{modalError}</p>}

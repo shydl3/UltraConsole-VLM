@@ -1,9 +1,11 @@
 import type { EventsConfig } from '../api/contracts'
 import type { VlmParameters } from './vlmParameters'
 
+export type RuleCategory = 'poi_event' | 'forced_passage' | 'integrity'
 export type VlmEventDefinition = {
-  id: string; description: string; enabled?: boolean; poiIds?: string[]; cueIds?: string[]; integrityIds?: string[]; triggerKinds?: string[]
-  preSeconds?: number; postSeconds?: number; criteria?: string[]; uncertainWhen?: string[]
+  id: string; description: string; enabled?: boolean; category?: RuleCategory
+  poiIds?: string[]; cueIds?: string[]; integrityIds?: string[]; triggerKinds?: string[]
+  cueDedupeSec?: number; preSeconds?: number; postSeconds?: number; criteria?: string[]; uncertainWhen?: string[]
 }
 export type VlmProgress = {
   stage?: string; sampledFrames?: number; candidateCount?: number; trackingFraction?: number
@@ -15,6 +17,7 @@ export type VlmRun = {
   progress?: VlmProgress
   summary?: { resultCount: number; reason?: string; dryRun?: boolean; failedRequests?: number }
   parameters?: VlmParameters
+  durationSec?: number | null
   startedAt?: number; finishedAt?: number; updatedAt?: number
 }
 /** A task row: a server run, or an upload that has not produced a run yet. */
@@ -32,12 +35,19 @@ export type VlmIntegrityEvidence = {
   before?: string; after?: string; diff?: string; context?: string
 }
 export type VlmResult = {
-  resultId: string; trackId?: number | null; trackSegmentId?: string; poiId: string; triggerSec: number
+  resultId: string; trackId?: number | null; trackSegmentId?: string; poiId: string; poiKind?: string; triggerSec: number
+  cueId?: string; cueLabel?: string; pairIndex?: number | null
   triggerKind: string; eventDefinitionId: string; description: string; decision: string
   inferenceStatus: string; modelDecisionConfidence: number | null; reason: string; error?: string
   modelDecision?: string; videoDescription?: string | null; deterministicDecision?: string
   eventCriteria?: string[]; conditions?: VlmCondition[]
-  cueEvidence?: { cueIds: string[]; state: string; onsetSec: number | null }
+  cueEvidence?: {
+    cueIds: string[]; state: string; onsetSec: number | null
+    triggerCueId?: string; cueLabel?: string; pairIndex?: number | null
+    poiId?: string; poiLabel?: string; poiKind?: string
+    interval?: [number, number]; rawTriggerCount?: number
+    retreated?: boolean; retreatSec?: number | null; entrySec?: number | null
+  }
   integrityEvidence?: VlmIntegrityEvidence
   previewPath?: string; downgradeReasons?: string[]; qualityWarnings?: string[]; postprocessVersion?: string
   segments?: { previewPath?: string; reason?: string; videoDescription?: string | null; decision?: string; conditions?: VlmCondition[]; rawOutputPath?: string; sampleManifest?: string; window: { startSec: number; endSec: number } }[]
@@ -100,19 +110,20 @@ export const INTEGRITY_DEFAULTS = {
 
 export type VlmPoi = {
   id: string; label: string; kind: string; points: number[][]; anchor: string
+  pairIndex?: number
   entryDirection?: 'positive_to_negative' | 'negative_to_positive' | null
 }
 
 export function vlmPois(config: EventsConfig): VlmPoi[] {
   return [
-    ...config.lines.map(l => ({ id: l.id, label: l.name || l.id, kind: 'line', points: [[l.a.x, l.a.y], [l.b.x, l.b.y]], anchor: 'bbox_center', entryDirection: l.entryDirection ?? null })),
-    ...config.zones.map(z => ({ id: z.id, label: z.name || z.id, kind: 'zone', points: z.polygon.map(p => [p.x, p.y]), anchor: 'bbox_center' })),
+    ...config.lines.map(l => ({ id: l.id, label: l.name || l.id, kind: 'line', pairIndex: l.pairIndex, points: [[l.a.x, l.a.y], [l.b.x, l.b.y]], anchor: 'bbox_center', entryDirection: l.entryDirection ?? null })),
+    ...config.zones.map(z => ({ id: z.id, label: z.name || z.id, kind: 'zone', pairIndex: z.pairIndex, points: z.polygon.map(p => [p.x, p.y]), anchor: 'bbox_center' })),
   ]
 }
 
 export function vlmCues(config: EventsConfig) {
   return (config.cues || []).map(c => ({
-    id: c.id, label: c.name || c.id, points: c.polygon.map(p => [p.x, p.y]),
+    id: c.id, label: c.name || c.id, pairIndex: c.pairIndex, points: c.polygon.map(p => [p.x, p.y]),
     minOnRatio: c.minOnRatio ?? CUE_DEFAULTS.minOnRatio,
     minR: c.minR ?? CUE_DEFAULTS.minR,
     minRG: c.minRG ?? CUE_DEFAULTS.minRG,

@@ -27,10 +27,10 @@ def client(tmp_path, monkeypatch, local_vlm_models):
     return TestClient(main.app, headers={"authorization": "Bearer secret"})
 
 
-def make_clip(path):
+def make_clip(path, value=0):
     writer = cv2.VideoWriter(str(path), cv2.VideoWriter_fourcc(*"mp4v"), 25, (96, 64))
     for _ in range(25):
-        writer.write(np.zeros((64, 96, 3), np.uint8))
+        writer.write(np.full((64, 96, 3), value, np.uint8))
     writer.release()
     return path
 
@@ -56,7 +56,9 @@ def test_upload_start_results_auth_and_range(client, tmp_path, monkeypatch, loca
     response = client.post("/api/vlm/runs", json=payload)
     assert response.status_code == 200, response.text
     run = response.json()["runId"]
-    assert client.get(f"/api/vlm/runs/{run}").json()["state"] == "completed"
+    status = client.get(f"/api/vlm/runs/{run}").json()
+    assert status["state"] == "completed"
+    assert status["durationSec"] >= 0
     results = client.get(f"/api/vlm/runs/{run}/results?trackId=7").json()
     assert results["total"] == 1
     assert results["items"][0]["videoDescription"] == "目标走向门框，随后被旁人遮挡。"
@@ -365,6 +367,22 @@ def test_browse_lists_only_videos_under_root(client, tmp_path, monkeypatch):
     assert client.get("/api/vlm/browse", params={"path": str(media / "missing")}).status_code == 404
 
 
+def test_transport_stream_videos_are_selectable(client, tmp_path, monkeypatch):
+    media = tmp_path / "media"
+    media.mkdir()
+    # Content sniffing (not the suffix) decides whether a file is a video.
+    make_clip(tmp_path / "clip.mp4").rename(media / "cam.ts")
+    (media / "notes.ts").write_bytes(b"not a video")
+    monkeypatch.setattr(api, "BROWSE_ROOT", media.resolve())
+    names = {item["name"] for item in client.get("/api/vlm/browse").json()["files"]}
+    assert names == {"cam.ts", "notes.ts"}
+    body = client.post("/api/vlm/videos/import", json={"path": str(media / "cam.ts")}).json()
+    assert body["fileName"] == "cam.ts"
+    response = client.get(f"/api/vlm/videos/{body['videoId']}/source")
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "video/mp2t"
+
+
 def test_import_registers_server_video_without_transfer(client, tmp_path, monkeypatch):
     media = tmp_path / "media"
     media.mkdir()
@@ -404,3 +422,49 @@ def test_imported_video_serves_library_and_run_flows(client, tmp_path, monkeypat
                "events": [{"id": "e", "description": "test"}]}
     assert client.post("/api/vlm/runs", json=payload).status_code == 200
     assert len(launched) == 1
+
+
+def test_video_thumbnail_extracts_first_frame(client, tmp_path):
+    vid = upload(client, tmp_path)
+    response = client.get(f"/api/vlm/videos/{vid}/thumbnail")
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"] == "image/jpeg"
+    assert response.content[:2] == b"\xff\xd8"
+    assert (api.DATA_ROOT / "uploads" / vid / "thumbnail.jpg").is_file()
+    assert TestClient(main.app).get(f"/api/vlm/videos/{vid}/thumbnail").status_code == 401
+
+
+def test_import_folder_batches_videos_and_reports_failures(client, tmp_path, monkeypatch):
+    media = tmp_path / "media"
+    media.mkdir()
+    make_clip(media / "a.mp4")
+    make_clip(media / "b.mp4", 80)
+    (media / "notes.txt").write_text("x")
+    (media / "broken.mp4").write_bytes(b"not a video")
+    (media / "sub").mkdir()
+    make_clip(media / "sub" / "c.mp4")
+    monkeypatch.setattr(api, "BROWSE_ROOT", media.resolve())
+
+    response = client.post("/api/vlm/videos/import-folder", json={"path": str(media)})
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert sorted(video["fileName"] for video in body["videos"]) == ["a.mp4", "b.mp4"]
+    assert [error["name"] for error in body["errors"]] == ["broken.mp4"]
+    assert body["truncated"] is False
+    assert TestClient(main.app).post("/api/vlm/videos/import-folder", json={"path": str(media)}).status_code == 401
+
+    # Identical content is reused on a second pass, and files are hard-linked.
+    again = client.post("/api/vlm/videos/import-folder", json={"path": str(media)}).json()
+    assert sorted(video["videoId"] for video in again["videos"]) == sorted(video["videoId"] for video in body["videos"])
+    assert all(video["reused"] for video in again["videos"])
+    for video in body["videos"]:
+        folder = api.DATA_ROOT / "uploads" / video["videoId"]
+        stored = next(folder.glob("source.*"))
+        assert stored.stat().st_ino == (media / video["fileName"]).stat().st_ino
+
+    # The folder endpoint is confined to the browse root and refuses non-folders.
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    make_clip(outside / "outside.mp4")
+    assert client.post("/api/vlm/videos/import-folder", json={"path": str(outside)}).status_code == 400
+    assert client.post("/api/vlm/videos/import-folder", json={"path": str(media / "a.mp4")}).status_code == 400

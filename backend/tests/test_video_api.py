@@ -62,6 +62,80 @@ def make_surveillance_video(path):
             output.mux(packet)
 
 
+def make_h264_transport_stream(path):
+    # DVR-style transport stream misnamed .mp4: browser-hostile container,
+    # browser-friendly H.264 stream and a nonzero timestamp origin.
+    with av.open(str(path), "w", format="mpegts") as output:
+        stream = output.add_stream("libx264", rate=25)
+        stream.width, stream.height = 320, 192
+        stream.pix_fmt = "yuv420p"
+        stream.codec_context.time_base = Fraction(1, 90000)
+        stream.options = {"preset": "ultrafast", "x264-params": "keyint=25:min-keyint=25"}
+        for i in range(50):
+            frame = av.VideoFrame.from_ndarray(np.full((192, 320, 3), i * 5, dtype=np.uint8), format="rgb24")
+            frame.pts = 900000 + i * 3600
+            frame.time_base = Fraction(1, 90000)
+            for packet in stream.encode(frame):
+                output.mux(packet)
+        for packet in stream.encode():
+            output.mux(packet)
+
+
+def test_h264_container_is_remuxed_without_gpu(tmp_path):
+    # A plain packet copy needs neither NVDEC nor NVENC: this runs on any machine.
+    source = tmp_path / "surveillance.mp4"
+    make_h264_transport_stream(source)
+    target = tmp_path / "preview.mp4"
+    api.transcode(source, target, threading.Event(), lambda value: None)
+    with av.open(str(target)) as video:
+        stream = video.streams.video[0]
+        assert stream.codec_context.name == "h264"
+        assert stream.codec_context.pix_fmt == "yuv420p"
+        frames = list(video.decode(video=0))
+    assert len(frames) == 50
+    assert frames[0].time == 0
+    assert frames[-1].time == pytest.approx(49 * .04)
+
+
+def test_preview_from_imported_h264_container_uses_remux(client, tmp_path, monkeypatch):
+    source = tmp_path / "source.mp4"
+    make_h264_transport_stream(source)
+    content = source.read_bytes()
+    folder = vlm.DATA_ROOT / "uploads" / "h264ts"
+    folder.mkdir(parents=True)
+    (folder / "source.mp4").write_bytes(content)
+    (folder / "video.json").write_text(json.dumps(
+        {"videoId": "h264ts", "fileName": "监控.mp4", "sourceName": "source.mp4",
+         "sha256": hashlib.sha256(content).hexdigest(), "sizeBytes": len(content)}))
+    response = client.post("/api/video/previews/from-video", json={"videoId": "h264ts"})
+    assert response.status_code == 202, response.text
+    identifier = response.json()["id"]
+    assert wait_for_preview(client, identifier)["state"] == "ready"
+    saved = api.jobs[identifier]["preview"]
+    with av.open(str(saved)) as video:
+        assert video.streams.video[0].codec_context.name == "h264"
+        assert len(list(video.decode(video=0))) == 50
+
+
+def test_preview_cache_evicts_oldest_but_keeps_live_jobs(tmp_path, monkeypatch):
+    monkeypatch.setattr(api, "CACHE_ROOT", tmp_path)
+    monkeypatch.setattr(api, "CACHE_LIMIT", 10)
+    monkeypatch.setattr(api, "jobs", {"live": {"preview": tmp_path / "b.mp4"}})
+    for name, mtime in (("a.mp4", 1), ("b.mp4", 2), ("c.mp4", 3)):
+        (tmp_path / name).write_bytes(b"x" * 8)
+        os.utime(tmp_path / name, (mtime, mtime))
+    (tmp_path / "a.json").write_text("{}")
+    api._prune_cache(tmp_path / "c.mp4")
+    # Oldest unused preview is evicted, but live and just-published ones stay.
+    assert not (tmp_path / "a.mp4").exists()
+    assert not (tmp_path / "a.json").exists()
+    assert (tmp_path / "b.mp4").exists()
+    assert (tmp_path / "c.mp4").exists()
+    monkeypatch.setattr(api, "CACHE_LIMIT", 0)  # disabled
+    api._prune_cache(tmp_path / "c.mp4")
+    assert (tmp_path / "b.mp4").exists()
+
+
 @pytest.mark.skipif(os.getenv("ULTRA_TEST_GPU_VIDEO") != "1", reason="Set ULTRA_TEST_GPU_VIDEO=1 on NVIDIA hardware")
 def test_hevc_gpu_timeline_auth_range_and_cleanup(client, tmp_path):
     source = tmp_path / "surveillance.mp4"

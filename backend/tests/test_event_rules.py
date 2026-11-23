@@ -138,6 +138,99 @@ def test_empty_cue_binding_expands_to_all_run_cues(client, monkeypatch):
     assert request['events'][0]['cueIds'] == ['red', 'red2']
 
 
+def forced_payload(library, identifier='forced'):
+    item = next(r for r in library['rules'] if r['id'] == identifier)
+    return {
+        'videoId': 'clip', 'revision': library['revision'],
+        'selections': [{'id': identifier, 'version': item['version'],
+                        'poiIds': ['line1', 'zone1'], 'cueIds': ['cue1']}],
+        'pois': [
+            {'id': 'line1', 'kind': 'line', 'points': [[.1, .5], [.9, .5]],
+             'pairIndex': 1, 'entryDirection': 'negative_to_positive'},
+            {'id': 'zone1', 'kind': 'zone', 'points': [[.2, .2], [.8, .2], [.8, .8], [.2, .8]],
+             'pairIndex': 1},
+        ],
+        'cues': [{'id': 'cue1', 'points': [[.35, .35], [.65, .35], [.65, .65], [.35, .65]],
+                  'pairIndex': 1}],
+    }
+
+
+def test_forced_passage_resolves_paired_line_signal_and_auxiliary_zone(client, monkeypatch):
+    library = save(client, [rule('forced', category='forced_passage', triggerKinds=['cue.on'], preSeconds=8)]).json()
+    folder = api.DATA_ROOT / 'uploads/clip'
+    folder.mkdir(parents=True)
+    jobs.write_json(folder / 'video.json', {'fileName': 'clip.mp4', 'sourceName': 'source.mp4', 'sha256': 'abc'})
+    (folder / 'source.mp4').write_bytes(b'test')
+
+    def launch(run_dir, _python):
+        status = jobs.read_json(run_dir / 'status.json')
+        jobs.write_json(run_dir / 'status.json', {**status, 'state': 'completed'})
+    monkeypatch.setattr(jobs, 'launch', launch)
+    response = client.post('/api/vlm/runs/from-rules', json=forced_payload(library))
+    assert response.status_code == 200, response.text
+    rid = response.json()['runId']
+    event = jobs.read_json(api.DATA_ROOT / f'runs/{rid}/request.json')['request']['events'][0]
+    assert event['category'] == 'forced_passage'
+    assert event['triggerKinds'] == ['cue.on']
+    assert event['poiIds'] == ['line1', 'zone1']
+    assert event['cueIds'] == ['cue1']
+    assert event['preSeconds'] == 8
+    snapshot = client.get(f'/api/vlm/runs/{rid}/rules').json()['rules'][0]['event']
+    assert snapshot['category'] == 'forced_passage'
+
+
+def test_forced_passage_binding_validation(client, monkeypatch):
+    library = save(client, [rule('forced', category='forced_passage', triggerKinds=['cue.on'])]).json()
+    def no_launch(*_args):
+        pytest.fail('Invalid forced-passage bindings must not launch a worker')
+    monkeypatch.setattr(jobs, 'launch', no_launch)
+
+    payload = forced_payload(library)
+    payload['cues'] = []
+    payload['selections'][0]['cueIds'] = []
+    assert client.post('/api/vlm/runs/from-rules', json=payload).status_code == 422
+
+    payload = forced_payload(library)
+    payload['cues'][0]['pairIndex'] = 2
+    assert client.post('/api/vlm/runs/from-rules', json=payload).status_code == 422
+
+    payload = forced_payload(library)
+    payload['pois'][0]['entryDirection'] = None
+    assert client.post('/api/vlm/runs/from-rules', json=payload).status_code == 422
+
+    payload = forced_payload(library)
+    payload['pois'] = [payload['pois'][1]]
+    payload['selections'][0]['poiIds'] = ['zone1']
+    assert client.post('/api/vlm/runs/from-rules', json=payload).status_code == 422
+
+    payload = forced_payload(library)
+    payload['pois'].append({'id': 'zone2', 'kind': 'zone', 'points': [[.2, .2], [.8, .2], [.8, .8]],
+                            'pairIndex': 4})
+    payload['selections'][0]['poiIds'].append('zone2')
+    assert client.post('/api/vlm/runs/from-rules', json=payload).status_code == 422
+
+    # A poi-event rule cannot run when only integrity zones are drawn.
+    library = save(client, [rule('plain')]).json()
+    payload = integrity_payload(library, identifier='plain')
+    payload['selections'][0]['poiIds'] = []
+    assert client.post('/api/vlm/runs/from-rules', json=payload).status_code == 422
+
+
+def test_rule_library_category_migration(client):
+    jobs.write_json(api.DATA_ROOT / 'event-rules.json', {'revision': 1, 'rules': [
+        {'id': 'old-line', 'name': '旧计数', 'description': '计数', 'enabled': True,
+         'triggerKinds': ['line.cross'], 'preSeconds': 4, 'postSeconds': 6,
+         'criteria': [], 'uncertainWhen': [], 'version': 1, 'createdAt': 0, 'updatedAt': 0},
+        {'id': 'old-wall', 'name': '旧完整性', 'description': '完整性', 'enabled': True,
+         'triggerKinds': ['integrity.change'], 'preSeconds': 4, 'postSeconds': 6,
+         'criteria': [], 'uncertainWhen': [], 'version': 1, 'createdAt': 0, 'updatedAt': 0},
+    ]})
+    rows = {row['id']: row for row in client.get('/api/vlm/event-rules').json()['rules']}
+    assert rows['old-line']['category'] == 'poi_event'
+    assert rows['old-wall']['category'] == 'integrity'
+    assert rows['preset_integrity']['category'] == 'integrity'
+
+
 def test_old_rule_without_cueids_still_resolves(client, monkeypatch):
     old_rule = {'id': 'old-rule', 'name': '旧规则', 'description': '是否异常', 'enabled': True,
                 'poiIds': [], 'triggerKinds': ['line.cross'], 'preSeconds': 4, 'postSeconds': 6,
@@ -252,7 +345,7 @@ def integrity_payload(library, identifier='wall-rule', **changes):
 
 
 def test_integrity_only_run_resolves_without_pois(client, monkeypatch):
-    library = save(client, [rule('wall-rule', triggerKinds=['integrity.change'])]).json()
+    library = save(client, [rule('wall-rule', category='integrity', triggerKinds=['integrity.change'])]).json()
     folder = api.DATA_ROOT / 'uploads/clip'
     folder.mkdir(parents=True)
     jobs.write_json(folder / 'video.json', {'fileName': 'clip.mp4', 'sourceName': 'source.mp4', 'sha256': 'abc'})
@@ -273,7 +366,7 @@ def test_integrity_only_run_resolves_without_pois(client, monkeypatch):
 
 
 def test_integrity_binding_validation(client, monkeypatch):
-    library = save(client, [rule('wall-rule', triggerKinds=['integrity.change'])]).json()
+    library = save(client, [rule('wall-rule', category='integrity', triggerKinds=['integrity.change'])]).json()
     def no_launch(*_args):
         pytest.fail('Invalid integrity bindings must not launch a worker')
     monkeypatch.setattr(jobs, 'launch', no_launch)
@@ -328,3 +421,24 @@ def test_preset_integrity_seeded_auto_bound_and_skipped_without_zones(client, mo
     assert response.status_code == 200, response.text
     request = jobs.read_json(api.DATA_ROOT / f'runs/{response.json()["runId"]}/request.json')['request']
     assert [e['id'] for e in request['events']] == ['custom']
+
+
+def test_legacy_forced_passage_template_is_converted(client):
+    jobs.write_json(api.DATA_ROOT / 'event-rules.json', {'revision': 2, 'rules': [
+        {'id': 'forced_passage_unopposed', 'name': '旧强行通过', 'description': '是否该人员强行通过安检门且无人阻拦',
+         'enabled': True, 'triggerKinds': ['line.cross', 'zone.enter', 'zone.leave'],
+         'preSeconds': 2.0, 'postSeconds': 5.0, 'criteria': [], 'uncertainWhen': [],
+         'version': 2, 'createdAt': 0, 'updatedAt': 0},
+    ]})
+    value = client.get('/api/vlm/event-rules').json()
+    row = next(r for r in value['rules'] if r['id'] == 'forced_passage_unopposed')
+    assert row['category'] == 'forced_passage'
+    assert row['triggerKinds'] == ['cue.on']
+    assert row['preSeconds'] == 8
+    assert row['postSeconds'] == 6
+    assert row['version'] == 3
+    assert value['revision'] == 3
+    # Idempotent: a second read must not bump the version or revision again.
+    again = client.get('/api/vlm/event-rules').json()
+    assert again['revision'] == 3
+    assert next(r for r in again['rules'] if r['id'] == 'forced_passage_unopposed')['version'] == 3

@@ -9,7 +9,8 @@ from .models import default_model_path
 Identifier = Annotated[str, Field(pattern=r"^[A-Za-z0-9_-]{1,80}$")]
 Coordinate = Annotated[float, Field(ge=0, le=1)]
 Point = tuple[Coordinate, Coordinate]
-Trigger = Literal["line.cross", "zone.enter", "zone.leave", "initial_inside", "integrity.change"]
+Trigger = Literal["line.cross", "zone.enter", "zone.leave", "initial_inside", "cue.on", "integrity.change"]
+RuleCategory = Literal["poi_event", "forced_passage", "integrity"]
 
 
 class StrictModel(BaseModel):
@@ -25,6 +26,10 @@ class Poi(StrictModel):
     # Only meaningful for kind="line". When set, only crossings in this direction
     # are treated as "entries"; the opposite crossing is a retreat, not a new event.
     entryDirection: Literal["positive_to_negative", "negative_to_positive"] | None = None
+    # Channel number for signal-triggered rules: a counting line and the signal
+    # zone with the same pairIndex form one channel; an optional counting zone
+    # with the same number is used as auxiliary presence evidence.
+    pairIndex: int | None = Field(default=None, ge=1, le=1000)
 
     @model_validator(mode="after")
     def geometry(self):
@@ -52,6 +57,8 @@ class CueDefinition(StrictModel):
     id: Identifier
     label: str = Field(default="", max_length=200)
     points: list[Point] = Field(min_length=3, max_length=100)
+    # Channel number paired with the counting line of the same number.
+    pairIndex: int | None = Field(default=None, ge=1, le=1000)
     method: Literal["red_mask"] = "red_mask"
     # Red pixel ratio above this fraction marks the frame as "on".
     minOnRatio: float = Field(default=0.06, gt=0, le=1)
@@ -130,10 +137,16 @@ class EventDefinition(StrictModel):
     id: Identifier
     description: str = Field(min_length=1, max_length=1500)
     enabled: bool = True
+    # Stable rule category (the user-facing name stays free text). It decides
+    # required regions, triggering mode and the judgment path.
+    category: RuleCategory = "poi_event"
     poiIds: list[Identifier] = Field(default_factory=list, max_length=50)
     cueIds: list[Identifier] = Field(default_factory=list, max_length=20)
     integrityIds: list[Identifier] = Field(default_factory=list, max_length=20)
     triggerKinds: list[Trigger] = Field(default_factory=lambda: ["line.cross", "zone.enter", "zone.leave"], min_length=1)
+    # Signal-triggered rules merge re-ignitions within this window (anchored at
+    # the first trigger) into one event.
+    cueDedupeSec: float = Field(default=3.0, ge=0, le=60)
     preSeconds: float = Field(default=4, ge=0, le=60)
     postSeconds: float = Field(default=6, ge=0, le=60)
     criteria: list[Annotated[str, Field(min_length=1, max_length=500)]] = Field(default_factory=list, max_length=10)
@@ -143,6 +156,8 @@ class EventDefinition(StrictModel):
     def nonempty(self):
         if not self.description.strip() or self.preSeconds + self.postSeconds <= 0:
             raise ValueError("Description and time window must not be empty")
+        if "cue.on" in self.triggerKinds and any(kind != "cue.on" for kind in self.triggerKinds):
+            raise ValueError("cue.on cannot be combined with POI triggers")
         return self
 
 
@@ -191,6 +206,11 @@ class RunRequest(AnalysisParameters):
                 raise ValueError(f"Unknown cue referenced by {event.id}")
             if set(event.integrityIds) - set(integrity_ids):
                 raise ValueError(f"Unknown integrity zone referenced by {event.id}")
+            if event.category == "forced_passage":
+                if "cue.on" not in event.triggerKinds or not event.cueIds:
+                    raise ValueError(f"Forced-passage rule {event.id} needs cue.on and a bound signal zone")
+                if not any(p.kind == "line" and p.id in event.poiIds for p in self.pois):
+                    raise ValueError(f"Forced-passage rule {event.id} needs a bound counting line")
         return self
 
 

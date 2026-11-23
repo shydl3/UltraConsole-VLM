@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { apiVlmBrowse, apiVlmImportVideo, type ServerBrowseListing, type ServerVideo } from '../../../api/client'
+import { apiVlmBrowse, apiVlmImportFolder, apiVlmImportVideo, type ServerBrowseListing, type ServerVideo } from '../../../api/client'
 import { useT } from '../../../i18n'
 import styles from './ServerVideoDialog.module.css'
 
@@ -15,9 +15,13 @@ type Picked = { name: string; size: number }
  * Server-side video browser replacing the local file input: remote operators
  * pick recordings that already live on this machine; confirming imports them
  * by reference (hard link / reuse), so no bytes travel through the browser.
+ *
+ * In folder mode it imports every video directly inside the current folder in
+ * one transaction. Batch recordings from one camera share the same geometry,
+ * so the operator draws regions once and starts the whole batch.
  */
-export function ServerVideoDialog({ multiple, onClose, onPicked }: {
-  multiple: boolean; onClose: () => void; onPicked: (videos: ServerVideo[]) => void
+export function ServerVideoDialog({ multiple, folderImport = false, onClose, onPicked }: {
+  multiple: boolean; folderImport?: boolean; onClose: () => void; onPicked: (videos: ServerVideo[]) => void
 }) {
   const t = useT()
   const ref = useRef<HTMLDialogElement>(null)
@@ -26,6 +30,11 @@ export function ServerVideoDialog({ multiple, onClose, onPicked }: {
   const [error, setError] = useState('')
   const [selected, setSelected] = useState<Record<string, Picked>>({})
   const [importing, setImporting] = useState<{ current: number; total: number } | null>(null)
+  const [folderBusy, setFolderBusy] = useState(false)
+  const [folderErrors, setFolderErrors] = useState<{ name: string; error: string }[]>([])
+  const [pendingFolder, setPendingFolder] = useState<ServerVideo[] | null>(null)
+  const [folderNote, setFolderNote] = useState('')
+  const busy = !!importing || folderBusy
 
   useEffect(() => { ref.current?.showModal() }, [])
 
@@ -45,6 +54,9 @@ export function ServerVideoDialog({ multiple, onClose, onPicked }: {
   function load(path: string) {
     setLoading(true)
     setError('')
+    setFolderErrors([])
+    setPendingFolder(null)
+    setFolderNote('')
     void fetchInto(path)
   }
 
@@ -62,7 +74,7 @@ export function ServerVideoDialog({ multiple, onClose, onPicked }: {
 
   async function confirm() {
     const paths = Object.keys(selected)
-    if (!paths.length || importing) return
+    if (!paths.length || busy) return
     setError('')
     setImporting({ current: 0, total: paths.length })
     const picked: ServerVideo[] = []
@@ -81,29 +93,60 @@ export function ServerVideoDialog({ multiple, onClose, onPicked }: {
     }
   }
 
+  async function importFolder() {
+    if (!listing || busy) return
+    setFolderBusy(true)
+    setError('')
+    setFolderErrors([])
+    setPendingFolder(null)
+    setFolderNote('')
+    try {
+      const result = await apiVlmImportFolder(listing.path)
+      if (result.videos.length && !result.errors.length && !result.truncated) {
+        onPicked(result.videos)
+        return
+      }
+      setPendingFolder(result.videos.length ? result.videos : null)
+      setFolderErrors(result.errors)
+      setFolderNote(result.videos.length
+        ? t('serverBrowser.folderPartial', { count: result.videos.length })
+        : t('serverBrowser.folderEmpty'))
+      if (result.truncated) setFolderNote(t('serverBrowser.folderTruncated', { count: result.videos.length }))
+    } catch (e) {
+      setError(String(e))
+    } finally {
+      setFolderBusy(false)
+    }
+  }
+
   const selectedCount = Object.keys(selected).length
-  return <dialog ref={ref} className={styles.dialog} aria-label={t('serverBrowser.title')}
-    onCancel={e => { e.preventDefault(); if (!importing) onClose() }}>
-    <h2>{t(multiple ? 'serverBrowser.titleMultiple' : 'serverBrowser.title')}</h2>
-    <div className={styles.hint}>{t('serverBrowser.hint', { root: listing?.root ?? '' })}</div>
+  const videoCount = listing?.files.length ?? 0
+  return <dialog ref={ref} className={styles.dialog} aria-label={t(folderImport ? 'serverBrowser.titleFolder' : multiple ? 'serverBrowser.titleMultiple' : 'serverBrowser.title')}
+    onCancel={e => { e.preventDefault(); if (!busy) onClose() }}>
+    <h2>{t(folderImport ? 'serverBrowser.titleFolder' : multiple ? 'serverBrowser.titleMultiple' : 'serverBrowser.title')}</h2>
+    <div className={styles.hint}>{folderImport
+      ? t('serverBrowser.folderHint')
+      : t('serverBrowser.hint', { root: listing?.root ?? '' })}</div>
     <div className={styles.path}>
-      <button type="button" disabled={!listing?.parent || !!importing}
+      <button type="button" disabled={!listing?.parent || busy}
         onClick={() => { if (listing?.parent) load(listing.parent) }}>{t('serverBrowser.parent')}</button>
       <div className={styles.current} title={listing?.path}>{listing?.path ?? '…'}</div>
-      <button type="button" disabled={loading || !!importing}
+      <button type="button" disabled={loading || busy}
         onClick={() => { if (listing) load(listing.path) }}>{t('serverBrowser.refresh')}</button>
     </div>
     <ul className={styles.list}>
       {loading && <li className={styles.empty}>{t('serverBrowser.loading')}</li>}
       {!loading && error && !listing && <li className={styles.empty}>{error}</li>}
       {!loading && listing && listing.dirs.map(dir => <li key={dir.path} className={`${styles.row} ${styles.dirRow}`}
-        onClick={() => load(dir.path)}>
+        onClick={() => { if (!busy) load(dir.path) }}>
         <span>📁</span><span className={styles.name} title={dir.name}>{dir.name}</span>
       </li>)}
       {!loading && listing && listing.files.map(file => <li key={file.path}
-        className={[styles.row, selected[file.path] ? styles.selected : ''].join(' ')}
-        onClick={() => { if (!importing) toggle(file.path, { name: file.name, size: file.size }) }}>
-        <input type="checkbox" readOnly checked={!!selected[file.path]} />
+        className={[styles.row, !folderImport && selected[file.path] ? styles.selected : ''].join(' ')}
+        onClick={() => { if (!folderImport && !busy) toggle(file.path, { name: file.name, size: file.size }) }}>
+        {folderImport
+          ? <span aria-hidden="true">🎞️</span>
+          : <input type="checkbox" readOnly checked={!!selected[file.path]} />}
         <span className={styles.name} title={file.name}>{file.name}</span>
         <span className={styles.meta}>{formatSize(file.size)}</span>
         <span className={styles.meta}>{new Date(file.mtime * 1000).toLocaleString()}</span>
@@ -113,13 +156,30 @@ export function ServerVideoDialog({ multiple, onClose, onPicked }: {
       {listing?.truncated && <li className={styles.empty}>{t('serverBrowser.truncated')}</li>}
     </ul>
     {error && listing && <div role="alert" className={styles.error}>{error}</div>}
+    {folderImport && folderNote && <div className={styles.hint}>{folderNote}</div>}
+    {folderImport && folderErrors.length > 0 && <div role="alert" className={styles.error}>
+      {t('serverBrowser.folderErrors', { count: folderErrors.length })}
+      <ul className={styles.errorList}>
+        {folderErrors.slice(0, 8).map(item => <li key={item.name}>{item.name}: {item.error}</li>)}
+        {folderErrors.length > 8 && <li>…</li>}
+      </ul>
+    </div>}
     <div className={styles.actions}>
-      <span className={styles.count}>{t('serverBrowser.selected', { count: selectedCount })}</span>
-      <button type="button" disabled={!!importing} onClick={onClose}>{t('serverBrowser.cancel')}</button>
-      <button type="button" disabled={!selectedCount || !!importing} onClick={() => void confirm()}>
+      <span className={styles.count}>{folderImport
+        ? t('serverBrowser.folderCount', { count: videoCount })
+        : t('serverBrowser.selected', { count: selectedCount })}</span>
+      <button type="button" disabled={busy} onClick={onClose}>{t('serverBrowser.cancel')}</button>
+      {folderImport ? <>
+        {pendingFolder && <button type="button" disabled={folderBusy} onClick={() => onPicked(pendingFolder)}>
+          {t('serverBrowser.addImported', { count: pendingFolder.length })}
+        </button>}
+        <button type="button" className={styles.primary} disabled={!videoCount || busy} onClick={() => void importFolder()}>
+          {folderBusy ? t('serverBrowser.folderImporting') : t('serverBrowser.importFolder', { count: videoCount })}
+        </button>
+      </> : <button type="button" disabled={!selectedCount || busy} onClick={() => void confirm()}>
         {importing ? t('serverBrowser.importing', { current: importing.current, total: importing.total })
           : t('serverBrowser.confirm', { count: selectedCount })}
-      </button>
+      </button>}
     </div>
   </dialog>
 }

@@ -51,10 +51,13 @@ export const ResultCard = memo(function ResultCard({ result, runId, ruleName, ex
 }) {
   const t = useT()
   const integrity = result.triggerKind === 'integrity.change' ? result.integrityEvidence : undefined
+  const cue = result.triggerKind === 'cue.on' ? result.cueEvidence : undefined
   return <article id={`result-${result.resultId}`} className={[styles.card, active ? styles.cardActive : ''].filter(Boolean).join(' ')}>
     <div className={styles.cardHead}>
       <button type="button" className={styles.cardTitle} aria-expanded={expanded} onClick={() => onToggle(result.resultId)}>
-        {integrity ? `${integrity.label} · ${result.triggerSec.toFixed(2)}s` : `#${result.trackId} · ${result.triggerSec.toFixed(2)}s · ${result.poiId}`}
+        {cue
+          ? `${cue.cueLabel ?? cue.triggerCueId ?? result.cueId ?? 'C'} · ${result.triggerSec.toFixed(2)}s · ${cue.poiLabel ?? result.poiId}`
+          : integrity ? `${integrity.label} · ${result.triggerSec.toFixed(2)}s` : `#${result.trackId} · ${result.triggerSec.toFixed(2)}s · ${result.poiId}`}
       </button>
       <span className={[styles.badge, styles[decisionTone(result)]].join(' ')}>{t(decisionKey(result))}</span>
     </div>
@@ -69,6 +72,16 @@ export const ResultCard = memo(function ResultCard({ result, runId, ruleName, ex
       {result.deterministicDecision && <div className={styles.section}>
         {t('vlm.deterministic')}: {t(`vlm.${result.deterministicDecision}`)}
         {result.cueEvidence ? ` · ${t('vlm.cueState')}=${result.cueEvidence.state}${result.cueEvidence.onsetSec != null ? ` @${result.cueEvidence.onsetSec.toFixed(2)}s` : ''}` : ''}
+      </div>}
+      {cue && <div className={styles.section}>
+        <strong>{t('vlm.cueTrigger')}</strong>
+        <span>{cue.cueLabel ?? cue.triggerCueId} (#{cue.pairIndex ?? '?'}) · {t('vlm.cueInterval')} {cue.interval ? `${cue.interval[0].toFixed(2)}–${cue.interval[1].toFixed(2)}s` : '—'}</span>
+        {(cue.rawTriggerCount ?? 1) > 1 && <span> · {t('vlm.cueRawTriggers')} {cue.rawTriggerCount}</span>}
+        <span> · {t('vlm.pairedPoi')}: {cue.poiLabel ?? cue.poiId} ({cue.poiKind ?? 'line'})</span>
+        <span> · {cue.retreated
+          ? `${t('vlm.retreated')}${cue.retreatSec != null ? ` @${cue.retreatSec.toFixed(2)}s` : ''}`
+          : t('vlm.notRetreated')}</span>
+        {cue.entrySec != null && <span> · {t('vlm.entryAt')} {cue.entrySec.toFixed(2)}s</span>}
       </div>}
       {integrity && <div className={styles.section}>
         <strong>{t('vlm.integrityEvidence')}</strong>

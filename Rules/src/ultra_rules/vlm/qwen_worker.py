@@ -4,7 +4,18 @@ import time
 from pathlib import Path
 
 from .contracts import RunRequest
-from .decision import candidate_groups, cue_state_in_window, evaluate, load_cue_timelines, retreat_candidate_ids
+from .decision import (
+    RETREAT_SECONDS,
+    candidate_groups,
+    cue_state_in_window,
+    evaluate,
+    load_cue_timelines,
+    merge_cue_episodes,
+    retreat_candidate_ids,
+    retreat_event,
+    select_cue_target,
+    tracked_through,
+)
 from .prompting import PROMPT_VERSION, integrity_prompt, prompt
 from .results import aggregate_result, apply_answer, complete_json_answer, decision_from_conditions, parse_answer
 from .sampling import build_sample, windows
@@ -393,6 +404,116 @@ def _process_integrity(run_dir, config, request, zone, index, interval, event, s
              decisions=state["counts"], currentSegment=state.get("currentSegment", 0))
 
 
+def _cue_pairs(request: RunRequest, events: dict, timelines: dict):
+    """One entry per forced-passage channel and signal episode."""
+    lines = {p.id: p for p in request.pois if p.kind == "line" and p.pairIndex is not None}
+    zones = {p.id: p for p in request.pois if p.kind == "zone" and p.pairIndex is not None}
+    cues = {c.id: c for c in request.cues if c.pairIndex is not None}
+    pairs = []
+    for event in events.values():
+        if event.category != "forced_passage":
+            continue
+        line_by_index = {lines[i].pairIndex: lines[i] for i in event.poiIds if i in lines}
+        zone_by_index = {zones[i].pairIndex: zones[i] for i in event.poiIds if i in zones}
+        cue_by_index = {cues[i].pairIndex: cues[i] for i in event.cueIds if i in cues}
+        for index, line in line_by_index.items():
+            cue = cue_by_index.get(index)
+            if cue is None:
+                continue
+            raw = timelines.get(cue.id, {}).get("intervals", [])
+            for episode_index, episode in enumerate(merge_cue_episodes(raw, event.cueDedupeSec)):
+                pairs.append((event, line, zone_by_index.get(index), cue, episode_index,
+                              episode["interval"], episode["rawTriggerCount"]))
+    return pairs
+
+
+def _process_cue_candidate(run_dir, config, request, event, line, zone, cue, episode_index, interval,
+                           raw_trigger_count, candidates, grouped, state):
+    """One deterministic verdict per signal episode (no model call by default)."""
+    result_id = f"cue-{cue.id}-{episode_index}-{event.id}"
+    if result_id in state["completed"]:
+        return
+    duration = float(config["video"]["durationSec"])
+    onset, offset = interval
+    start = max(0.0, onset - event.preSeconds)
+    end = min(duration, offset + event.postSeconds)
+    if end <= start:
+        end = min(duration, start + 1.0)
+    target = select_cue_target(candidates, line, zone, start, end, onset)
+    primary = line if target is None or target.get("triggerKind") == "line.cross" else (zone or line)
+    candidate = {
+        "candidateId": f"cue-{event.id}-{cue.id}-{episode_index}",
+        "triggerKind": "cue.on", "cueId": cue.id, "cueLabel": cue.label or cue.id,
+        "pairIndex": cue.pairIndex, "cueInterval": [onset, offset], "rawTriggerCount": raw_trigger_count,
+        "poiId": primary.id, "poiLabel": primary.label or primary.id, "poiKind": primary.kind,
+        "triggerSec": onset, "trackId": None, "trackSegmentId": None, "direction": None,
+        "identityAmbiguous": False,
+    }
+    quality_warnings = []
+    if target is None:
+        decision = "no_match"
+        entry_sec, retreat_sec, retreat_kind = None, None, None
+        reason = (f"信号区「{cue.label or cue.id}」亮起，但配对"
+                  f"{'计数区' if primary.kind == 'zone' else '计数线'}「{primary.label or primary.id}」窗口内无人通过")
+        quality_warnings.append("no_subject")
+    else:
+        candidate.update(trackId=target.get("trackId"), trackSegmentId=target.get("trackSegmentId"),
+                         direction=target.get("direction"), identityAmbiguous=target.get("identityAmbiguous", False))
+        entry_sec = target["triggerSec"]
+        retreat = retreat_event(target, grouped, entry_sec, entry_sec + RETREAT_SECONDS)
+        if retreat is None:
+            decision = "match"
+            retreat_sec, retreat_kind = None, None
+            reason = (f"信号区「{cue.label or cue.id}」亮起，配对{'计数区' if primary.kind == 'zone' else '计数线'}"
+                      f"「{primary.label or primary.id}」内目标进入后 {RETREAT_SECONDS:g} 秒内未退回")
+            try:
+                if not tracked_through(run_dir, target, entry_sec, entry_sec + RETREAT_SECONDS, request.maxGapSeconds):
+                    quality_warnings.append("tracking_gap")
+            except Exception:
+                quality_warnings.append("tracking_check_failed")
+        else:
+            decision = "no_match"
+            retreat_sec, retreat_kind = retreat["triggerSec"], retreat["triggerKind"]
+            reason = (f"信号区「{cue.label or cue.id}」亮起后，目标在 {retreat_sec:.1f}s "
+                      f"（{'离开计数区' if retreat_kind == 'zone.leave' else '反向跨线'}）退回，不算强行通过")
+    cue_evidence = {
+        "cueIds": [cue.id], "triggerCueId": cue.id, "cueLabel": cue.label or cue.id,
+        "pairIndex": cue.pairIndex, "poiId": primary.id, "poiLabel": primary.label or primary.id,
+        "poiKind": primary.kind, "state": "on", "onsetSec": onset, "interval": [onset, offset],
+        "rawTriggerCount": raw_trigger_count, "retreated": retreat_sec is not None,
+        "retreatSec": retreat_sec, "retreatKind": retreat_kind, "entrySec": entry_sec,
+    }
+    segments = []
+    try:
+        deterministic = {"decision": decision, "reason": reason}
+        segments = _build_deterministic_evidence(run_dir, config, request, candidate, event, result_id, deterministic)
+    except Exception:
+        quality_warnings.append("cue_evidence_missing")
+    output = {
+        "schemaVersion": "1", "runId": run_dir.name, "videoId": request.videoId, **candidate,
+        "eventDefinitionId": event.id, "description": event.description, "resultId": result_id,
+        "eventCriteria": event.criteria or [event.description],
+        "confidenceType": "deterministic_cue", "modelDecisionConfidence": None,
+        "inferenceStatus": "deterministic", "decision": decision, "deterministicDecision": decision,
+        "cueEvidence": cue_evidence, "retreatSec": retreat_sec, "retreatKind": retreat_kind,
+        "reason": reason, "qualityWarnings": quality_warnings, "downgradeReasons": [],
+        "segments": segments,
+    }
+    if segments:
+        first = segments[0]
+        for key in ("window", "quality", "previewPath", "sampleManifest"):
+            output[key] = first[key]
+    else:
+        output["window"] = {"startSec": start, "endSec": end}
+        output["quality"] = None
+    append_json(run_dir / "results.jsonl", output)
+    state["completed"].add(result_id)
+    state["done"] += 1
+    state["counts"][decision] += 1
+    progress(run_dir, completedRequests=state["done"], failedRequests=state["failed"],
+             decisions=state["counts"], currentSegment=state.get("currentSegment", 0))
+
+
 def understand(run_dir: Path):
     config = read_json(run_dir / "request.json")
     request = RunRequest.model_validate(config["request"])
@@ -400,9 +521,12 @@ def understand(run_dir: Path):
     events = {e.id: e for e in request.events if e.enabled}
     pois = {p.id: p for p in request.pois}
     retreat_ids = retreat_candidate_ids(candidates)
-    entry_candidates = [c for c in candidates if c["candidateId"] not in retreat_ids and _is_entry(c, pois)]
+    entry_candidates = [c for c in candidates if c["candidateId"] not in retreat_ids and _is_entry(c, pois)
+                        and c.get("eventDefinitionIds")]
     integrity_pairs = _integrity_pairs(run_dir, request, events)
-    total = sum(len(c["eventDefinitionIds"]) for c in entry_candidates) + len(integrity_pairs)
+    timelines = load_cue_timelines(run_dir) if any(event.cueIds for event in events.values()) else {}
+    cue_pairs = _cue_pairs(request, events, timelines)
+    total = sum(len(c["eventDefinitionIds"]) for c in entry_candidates) + len(integrity_pairs) + len(cue_pairs)
     # Logical time-range segments give progress granularity and crash recovery;
     # analysis stays in global time so results.jsonl needs no offset merge.
     segments = read_manifest(run_dir).get("segments") or [{"index": 0, "startSec": 0.0, "endSec": float("inf")}]
@@ -415,11 +539,15 @@ def understand(run_dir: Path):
     state = {"model": None, "done": len(completed), "failed": 0,
              "counts": {"match": 0, "no_match": 0, "uncertain": 0}, "completed": completed, "currentSegment": 0}
     grouped = candidate_groups(candidates)
-    timelines = load_cue_timelines(run_dir) if any(event.cueIds for event in events.values()) else {}
     # Deterministic integrity warnings stream first: they need no model warm-up
     # and remain available even when the run has no tracking candidates at all.
     for zone, index, interval, event, timeline in integrity_pairs:
         _process_integrity(run_dir, config, request, zone, index, interval, event, state, timeline)
+    # Signal-triggered forced-passage rules: one verdict per deduplicated signal
+    # episode, anchored on the paired counting line (or auxiliary zone).
+    for event, line, zone, cue, episode_index, interval, raw_count in cue_pairs:
+        _process_cue_candidate(run_dir, config, request, event, line, zone, cue, episode_index, interval,
+                               raw_count, candidates, grouped, state)
     for segment in segments:
         bucket = [c for c in entry_candidates if segment["startSec"] <= c["triggerSec"] < segment["endSec"]]
         if not bucket:

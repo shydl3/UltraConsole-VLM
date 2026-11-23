@@ -33,6 +33,24 @@ def _chunks(items, size: int):
         yield chunk
 
 
+SUPPORT_TRIGGERS = ("line.cross", "zone.enter", "zone.leave", "initial_inside")
+
+
+def candidate_owners(candidate: dict, events) -> tuple[list[str], list[str]]:
+    """Split rules into direct owners and signal-triggered support owners.
+
+    Signal rules never fire on POI candidates, but they need those crossings and
+    entries persisted to pick the target person and to detect a retreat. Support
+    rows keep ``eventDefinitionIds`` empty so they are not judged twice.
+    """
+    applicable = [e.id for e in events if e.enabled and candidate["triggerKind"] in e.triggerKinds
+                  and (not e.poiIds or candidate["poiId"] in e.poiIds)]
+    support = [e.id for e in events if e.enabled and e.category == "forced_passage"
+               and candidate["triggerKind"] in SUPPORT_TRIGGERS
+               and (not e.poiIds or candidate["poiId"] in e.poiIds)]
+    return applicable, support
+
+
 def _observation_row(index, t, source_type, width, height, source_pts, persons):
     return {"frameIndex": index, "mediaTimeSec": t, "sourcePtsSec": source_pts,
             "timeSource": source_type, "width": width, "height": height,
@@ -188,10 +206,11 @@ def track(run_dir: Path):
             if writer:
                 writer.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
             for candidate in tracker.update(row):
-                applicable = [e.id for e in request.events if e.enabled and candidate["triggerKind"] in e.triggerKinds
-                              and (not e.poiIds or candidate["poiId"] in e.poiIds)]
-                if applicable:
+                applicable, support = candidate_owners(candidate, request.events)
+                if applicable or support:
                     candidate["eventDefinitionIds"] = applicable
+                    if support:
+                        candidate["supportRuleIds"] = support
                     append_json(run_dir / "candidates.jsonl", candidate)
                     candidates += 1
             db.execute("INSERT INTO observations VALUES (?, ?, ?)",

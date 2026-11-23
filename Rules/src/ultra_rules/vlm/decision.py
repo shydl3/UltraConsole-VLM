@@ -81,7 +81,14 @@ def red_state(timelines: dict, cue_ids: list[str], entry_t: float, pre: float, p
     return cue_state_in_window(timelines, cue_ids, entry_t - pre, entry_t + post, anchor=entry_t)
 
 
-def _retreated(candidate: dict, grouped: dict[tuple, list[dict]], start: float, end: float) -> bool:
+def retreat_event(candidate: dict, grouped: dict[tuple, list[dict]], start: float, end: float):
+    """Return the retreating candidate inside [start, end], or None.
+
+    A line entry retreats by crossing back in the opposite direction; a zone
+    entry retreats by leaving the zone. Used by both POI-triggered rules and
+    signal-triggered forced-passage rules (the latter starts the window at the
+    target's entry time).
+    """
     seg, poi = candidate["trackSegmentId"], candidate["poiId"]
     for other in grouped.get((seg, poi), []):
         if other["candidateId"] == candidate["candidateId"]:
@@ -92,11 +99,58 @@ def _retreated(candidate: dict, grouped: dict[tuple, list[dict]], start: float, 
             continue
         if candidate["triggerKind"] == "line.cross":
             if other["triggerKind"] == "line.cross" and other.get("direction") and other["direction"] != candidate.get("direction"):
-                return True
-        elif candidate["triggerKind"] == "zone.enter":
+                return other
+        elif candidate["triggerKind"] in ("zone.enter", "initial_inside"):
             if other["triggerKind"] == "zone.leave":
-                return True
-    return False
+                return other
+    return None
+
+
+def _retreated(candidate: dict, grouped: dict[tuple, list[dict]], start: float, end: float) -> bool:
+    return retreat_event(candidate, grouped, start, end) is not None
+
+
+def merge_cue_episodes(intervals: list[list[float]], dedupe_seconds: float):
+    """Merge cue re-ignitions within ``dedupe_seconds`` of the episode start.
+
+    The anchor is the first trigger of the episode, not a rolling window, so a
+    flickering signal cannot chain forever. Returns one dict per episode with
+    the merged interval and how many raw triggers it absorbed.
+    """
+    episodes: list[dict] = []
+    for start, end in intervals:
+        if episodes and start - episodes[-1]["interval"][0] <= dedupe_seconds:
+            episodes[-1]["interval"][1] = max(episodes[-1]["interval"][1], end)
+            episodes[-1]["rawTriggerCount"] += 1
+        else:
+            episodes.append({"interval": [start, end], "rawTriggerCount": 1})
+    return episodes
+
+
+def select_cue_target(candidates: list[dict], line, zone, start: float, end: float, trigger: float):
+    """Pick the person nearest the signal trigger for one channel.
+
+    Prefer a crossing on the paired counting line in the entry direction; fall
+    back to entering the optional auxiliary counting zone when no line crossing
+    is present (e.g. tracking started while the person was already inside).
+    """
+    def inside(candidate):
+        return start <= candidate["triggerSec"] <= end
+
+    pool = [c for c in candidates
+            if c.get("poiId") == line.id and c.get("triggerKind") == "line.cross" and inside(c)
+            and (not line.entryDirection or c.get("direction") == line.entryDirection)]
+    if not pool and zone is not None:
+        pool = [c for c in candidates
+                if c.get("poiId") == zone.id and c.get("triggerKind") in ("zone.enter", "initial_inside") and inside(c)]
+    if not pool:
+        return None
+    return min(pool, key=lambda c: (abs(c["triggerSec"] - trigger), c["triggerSec"]))
+
+
+def tracked_through(run_dir: Path, candidate: dict, start: float, end: float, max_gap: float) -> bool:
+    """Public wrapper so signal-triggered verdicts can reuse the gap advisory."""
+    return _tracked_through(run_dir, candidate, start, end, max_gap)
 
 
 def _tracked_through(run_dir: Path, candidate: dict, start: float, end: float, max_gap: float) -> bool:

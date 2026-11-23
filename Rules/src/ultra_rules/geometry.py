@@ -1,7 +1,7 @@
 """Polygon containment for semantic POI tracking."""
 from __future__ import annotations
 
-from typing import Sequence
+from collections.abc import Sequence
 
 Point = tuple[float, float]
 Polygon = Sequence[Point]

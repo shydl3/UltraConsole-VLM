@@ -146,6 +146,38 @@ export async function apiVlmImportVideo(path: string): Promise<ServerVideo> {
   return { videoId: meta.videoId, name: meta.fileName, size: meta.sizeBytes }
 }
 
+export type FolderImport = {
+  folder: string
+  videos: ServerVideo[]
+  errors: { name: string; error: string }[]
+  truncated: boolean
+}
+
+/** Import every video directly inside one server-side folder (batch recordings). */
+export async function apiVlmImportFolder(path: string): Promise<FolderImport> {
+  const result = await apiVlm<{
+    folder: string
+    videos: { videoId: string; fileName: string; sizeBytes: number; reused: boolean }[]
+    errors: { name: string; error: string }[]
+    truncated: boolean
+  }>('/videos/import-folder', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })
+  return {
+    folder: result.folder,
+    errors: result.errors,
+    truncated: result.truncated,
+    videos: result.videos.map(video => ({ videoId: video.videoId, name: video.fileName, size: video.sizeBytes })),
+  }
+}
+
+/** First frame of an imported video; used while a browser-playable preview does not exist yet. */
+export async function apiVlmThumbnail(videoId: string): Promise<string> {
+  return apiVlmMedia(`/videos/${encodeURIComponent(videoId)}/thumbnail`)
+}
+
 export type VideoPreviewStatus = { state: 'uploading' | 'converting' | 'ready' | 'failed' | 'cancelled'; progress: number; error?: string }
 
 export async function apiCreateVideoPreviewFromVideo(videoId: string) {

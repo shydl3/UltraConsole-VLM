@@ -27,6 +27,9 @@ CACHE_ROOT = Path(os.getenv(
 )).expanduser().resolve()
 WORKER = Path(__file__).with_name("video_transcode.py")
 MAX_BYTES = int(os.getenv("ULTRA_VIDEO_MAX_UPLOAD_BYTES", str(8 * 1024**3)))
+# Lossless H.264 copies are nearly as large as their source, so the cache needs
+# a byte budget; 0 disables the limit and older previews rebuild on demand.
+CACHE_LIMIT = int(os.getenv("ULTRA_VIDEO_PREVIEW_CACHE_BYTES", str(64 * 1024**3)))
 # Bound concurrent GPU conversions so one long 2h transcode cannot block everyone,
 # while still preventing unbounded queue pile-up on a single GPU.
 MAX_CONCURRENT = int(os.getenv("ULTRA_VIDEO_MAX_CONCURRENT", "2"))
@@ -54,10 +57,11 @@ def _publish_preview(job: dict) -> None:
             json.dump({
                 "originalFilename": job["filename"], "sourceSha256": job["sha256"],
                 "sourceBytes": job["size"], "createdAt": time.time(),
-                "previewFile": job["preview"].name, "encoder": "h264_nvenc", "version": 1,
+                "previewFile": job["preview"].name, "encoder": "auto", "version": 2,
             }, output, ensure_ascii=False, indent=2)
         os.replace(metadata, job["preview"].with_suffix(".json"))
         os.replace(staged, job["preview"])
+        _prune_cache(job["preview"])
     finally:
         if staged is not None:
             staged.unlink(missing_ok=True)
@@ -65,8 +69,37 @@ def _publish_preview(job: dict) -> None:
             metadata.unlink(missing_ok=True)
 
 
+def _prune_cache(keep: Path) -> None:
+    """Evict the oldest previews once the cache outgrows CACHE_LIMIT bytes.
+
+    Previews referenced by a live job (including the one just published) are
+    never removed; evicted recordings simply rebuild on their next selection.
+    """
+    if CACHE_LIMIT <= 0:
+        return
+    with lock:
+        protected = {job["preview"] for job in jobs.values() if job.get("preview")}
+    protected.add(keep)
+    entries, total = [], 0
+    for path in CACHE_ROOT.glob("*.mp4"):
+        try:
+            stat = path.stat()
+        except OSError:
+            continue
+        entries.append((stat.st_mtime, stat.st_size, path))
+        total += stat.st_size
+    for _, size, path in sorted(entries, key=lambda entry: entry[0]):
+        if total <= CACHE_LIMIT:
+            break
+        if path in protected:
+            continue
+        path.with_suffix(".json").unlink(missing_ok=True)
+        path.unlink(missing_ok=True)
+        total -= size
+
+
 def transcode(source: Path, target: Path, cancel: threading.Event, progress) -> None:
-    """Use NVIDIA hardware for both codecs; never retry with software codecs."""
+    """H.264 is copied losslessly; other codecs need NVIDIA and never fall back to CPU."""
     if cancel.is_set():
         raise InterruptedError("Preview cancelled")
     try:
@@ -74,7 +107,7 @@ def transcode(source: Path, target: Path, cancel: threading.Event, progress) -> 
         # avoid pipe backpressure and let cancellation run while native code stalls.
         with tempfile.TemporaryFile(mode="w+") as updates, tempfile.TemporaryFile(mode="w+") as errors:
             process = subprocess.Popen(
-                [sys.executable, str(WORKER), str(source), str(target)],
+                [sys.executable, str(WORKER), str(source), str(target), "--mode", "auto"],
                 stdout=updates, stderr=errors,
             )
             try:
@@ -111,8 +144,8 @@ def transcode(source: Path, target: Path, cancel: threading.Event, progress) -> 
         raise
     except Exception as exc:
         raise RuntimeError(
-            "GPU preview conversion failed (NVIDIA NVDEC + NVENC required; CPU fallback disabled). "
-            f"Check GPU/driver availability and hardware support for this video: {exc}"
+            "Preview conversion failed (H.264 is copied without a GPU; other codecs need NVIDIA NVDEC + NVENC, "
+            f"CPU fallback disabled). Check the file and GPU/driver support for this video: {exc}"
         ) from exc
 
 

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bindingError, newRule, parseRuleImport, PRESET_RULE_ID, presetRule, ruleChanged, rulePayload } from './eventRules'
+import { bindingError, newRule, parseRuleImport, PRESET_RULE_ID, presetRule, ruleChanged, ruleError, rulePayload } from './eventRules'
 
 describe('event rule imports and per-run bindings', () => {
   it('assigns stable independent IDs to text entries and preserves exported definitions', () => {
@@ -29,7 +29,7 @@ describe('event rule imports and per-run bindings', () => {
     expect(bindingError({ ...row, triggerKinds: ['zone.enter'] }, [], pois)).not.toBe('')
   })
   it('supports integrity-only rules bound to integrity zones', () => {
-    const row = { ...newRule('围墙完整性'), triggerKinds: ['integrity.change' as const] }
+    const row = newRule('围墙完整性', 'integrity')
     const zones = [{ id: 'wall', kind: 'integrity', label: 'W1' }]
     expect(bindingError(row, [], [], zones)).toBe('')
     expect(bindingError(row, [], [], [])).not.toBe('')
@@ -47,5 +47,36 @@ describe('event rule imports and per-run bindings', () => {
     expect(ruleChanged(preset, { ...preset, version: 1 })).toBe(false)
     expect(ruleChanged({ ...preset, description: '改' }, { ...preset, version: 1 })).toBe(true)
     expect(rulePayload(preset).triggerKinds).toEqual(['integrity.change'])
+  })
+})
+
+describe('rule categories and signal-channel pairing', () => {
+  const line = { id: 'l1', label: 'L1', kind: 'line', pairIndex: 1, entryDirection: 'negative_to_positive' }
+  const zone = { id: 'z1', label: 'Z1', kind: 'zone', pairIndex: 1 }
+  const cue = { id: 'c1', label: 'C1', kind: 'cue', pairIndex: 1 }
+  const forced = newRule('强行通过未退回', 'forced_passage')
+
+  it('defaults a forced-passage rule to cue.on with a longer lookback', () => {
+    expect(forced.category).toBe('forced_passage')
+    expect(forced.triggerKinds).toEqual(['cue.on'])
+    expect(forced.preSeconds).toBe(8)
+    const imported = parseRuleImport(JSON.stringify({ rules: [rulePayload(forced)] }))
+    expect(imported[0].category).toBe('forced_passage')
+    expect(imported[0].triggerKinds).toEqual(['cue.on'])
+  })
+
+  it('requires a line, a signal ROI and matching channel numbers', () => {
+    expect(bindingError(forced, ['l1', 'z1'], [line, zone], [], ['c1'], [cue])).toBe('')
+    expect(bindingError(forced, ['l1'], [line], [], [], [])).not.toBe('')
+    expect(bindingError(forced, ['l1'], [line], [], ['c1'], [{ ...cue, pairIndex: 2 }])).not.toBe('')
+    expect(bindingError(forced, ['l1'], [{ ...line, entryDirection: null }], [], ['c1'], [cue])).not.toBe('')
+    expect(bindingError(forced, ['l1'], [{ ...line, pairIndex: undefined }], [], ['c1'], [cue])).not.toBe('')
+    expect(bindingError(forced, ['z1'], [zone], [], ['c1'], [cue])).not.toBe('')
+    expect(bindingError(forced, ['l1', 'z1'], [line, { ...zone, pairIndex: 2 }], [], ['c1'], [cue])).not.toBe('')
+  })
+
+  it('keeps cue.on out of non-forced-passage rules', () => {
+    const row = { ...newRule('计数'), triggerKinds: ['cue.on' as const] }
+    expect(ruleError(row)).not.toBe('')
   })
 })

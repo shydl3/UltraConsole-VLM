@@ -14,6 +14,14 @@ function genId(prefix: string) {
   return `${prefix}_${Math.random().toString(36).slice(2, 8)}`
 }
 
+/** Smallest positive channel number not used yet (deleted numbers are not reused). */
+function nextPairIndex(items: { pairIndex?: number }[]) {
+  const used = new Set(items.map(item => item.pairIndex).filter((value): value is number => typeof value === 'number'))
+  let index = 1
+  while (used.has(index)) index++
+  return index
+}
+
 function getSourceSize(el: HTMLElement | null): { w: number; h: number } | null {
   if (!el) return null
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -53,13 +61,16 @@ export const EventEditOverlay = forwardRef<EventEditOverlayHandle, {
   // 单一提交入口：起点闭合、双击、工具栏“完成绘制”按钮共用。
   const commitDraft = useCallback((): boolean => {
     if (props.mode === 'zone' && zoneDraft.length >= 3) {
-      const newZone: CountingZone = { id: genId('zone'), name: `Z${eventsConfig.zones.length + 1}`, polygon: zoneDraft }
+      // Numbering is per region type: L1 / Z1 / C1 all form channel 1.
+      const pairIndex = nextPairIndex(eventsConfig.zones)
+      const newZone: CountingZone = { id: genId('zone'), name: `Z${pairIndex}`, pairIndex, polygon: zoneDraft }
       setEventsConfig({ zones: [...eventsConfig.zones, newZone] })
       setZoneDraft([])
       return true
     }
     if (props.mode === 'cue' && cueDraft.length >= 3) {
-      const newCue: CountingZone = { id: genId('cue'), name: `C${(eventsConfig.cues?.length ?? 0) + 1}`, polygon: cueDraft }
+      const pairIndex = nextPairIndex(eventsConfig.cues || [])
+      const newCue: CountingZone = { id: genId('cue'), name: `C${pairIndex}`, pairIndex, polygon: cueDraft }
       setEventsConfig({ cues: [...(eventsConfig.cues || []), newCue] })
       setCueDraft([])
       return true
@@ -119,6 +130,12 @@ export const EventEditOverlay = forwardRef<EventEditOverlayHandle, {
         ctx.moveTo(toDx(l.a), toDy(l.a))
         ctx.lineTo(toDx(l.b), toDy(l.b))
         ctx.stroke()
+        if (l.pairIndex) {
+          ctx.font = '12px sans-serif'
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.9)'
+          ctx.fillText(`#${l.pairIndex}`, toDx({ x: (l.a.x + l.b.x) / 2, y: (l.a.y + l.b.y) / 2 }) + 4,
+            toDy({ x: (l.a.x + l.b.x) / 2, y: (l.a.y + l.b.y) / 2 }) - 4)
+        }
       }
 
       // 最新一条线的进入方向箭头
@@ -164,6 +181,12 @@ export const EventEditOverlay = forwardRef<EventEditOverlayHandle, {
         ctx.closePath()
         ctx.fill()
         ctx.stroke()
+        if (z.pairIndex) {
+          ctx.font = '12px sans-serif'
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.9)'
+          ctx.fillText(`#${z.pairIndex}`, toDx(z.polygon[0]) + 4, toDy(z.polygon[0]) - 4)
+          ctx.fillStyle = 'rgba(255, 99, 132, 0.08)'
+        }
       }
 
       ctx.strokeStyle = 'rgba(34, 221, 255, 0.6)'
@@ -178,6 +201,12 @@ export const EventEditOverlay = forwardRef<EventEditOverlayHandle, {
         ctx.closePath()
         ctx.fill()
         ctx.stroke()
+        if (c.pairIndex) {
+          ctx.font = '12px sans-serif'
+          ctx.fillStyle = 'rgba(255, 255, 255, 0.9)'
+          ctx.fillText(`#${c.pairIndex}`, toDx(c.polygon[0]) + 4, toDy(c.polygon[0]) - 4)
+          ctx.fillStyle = 'rgba(34, 221, 255, 0.08)'
+        }
       }
 
       // 完整性检测区（琥珀色，静态监控区域）
@@ -317,9 +346,11 @@ export const EventEditOverlay = forwardRef<EventEditOverlayHandle, {
           if (!previewLine?.a) {
             setPreviewLine({ a: p })
           } else {
+            const pairIndex = nextPairIndex(eventsConfig.lines)
             const newLine: CountingLine = {
               id: genId('line'),
-              name: `L${eventsConfig.lines.length + 1}`,
+              name: `L${pairIndex}`,
+              pairIndex,
               a: previewLine.a,
               b: p,
             }

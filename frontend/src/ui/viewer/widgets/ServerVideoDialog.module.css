@@ -117,6 +117,18 @@
   overflow-wrap: anywhere;
 }
 
+.errorList {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  max-height: 120px;
+  overflow: auto;
+}
+
+.dialog .primary {
+  border-color: var(--accent-blue);
+  color: var(--accent-blue);
+}
+
 .actions {
   display: flex;
   align-items: center;

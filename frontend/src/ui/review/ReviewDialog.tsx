@@ -4,6 +4,7 @@ import {
   EMPTY_FILTER, markerOffset, nearestMarker, savedPageSize, savedPreRoll, seekTarget,
   type ReviewFilter, type ReviewMarker,
 } from '../../utils/review'
+import { formatDuration } from '../../utils/library'
 import { activeVlm } from '../../utils/vlm'
 import { ParameterSnapshot } from '../vlm/AnalysisParameters'
 import { RuleSnapshotView } from '../vlm/RuleSnapshotView'
@@ -34,6 +35,9 @@ export function ReviewDialog({ target, onClose, standalone = false }: {
   const [followId, setFollowId] = useState('')
   const data = useReviewData(target, filter, offset, pageSize)
   const isRun = target.kind === 'vlm'
+  // Computed server-side from startedAt/finishedAt (same clock as the library list);
+  // live runs advance on the 2.5s poll.
+  const duration = data.run?.durationSec ?? null
 
   useEffect(() => {
     // Inside the detached window the dialog is the page itself: non-modal, filling
@@ -148,6 +152,7 @@ export function ReviewDialog({ target, onClose, standalone = false }: {
         <div className={styles.headingRow}>
           <h2 ref={headingRef} id="review-title" tabIndex={-1}>{data.name || t('review.title')}</h2>
           {data.run && <span className={styles.stateChip}>{t(`vlm.${data.run.state}`)}</span>}
+          {isRun && duration != null && <span className={styles.duration}>{t('review.duration')} {formatDuration(duration, t)}</span>}
           <span className={styles.muted}>{target.kind === 'vlm' ? t('library.vlm') : t('library.video')}</span>
         </div>
         <div className={styles.actions}>
