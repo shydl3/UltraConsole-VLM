@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { useConsoleStore, type RoiPoint } from '../../../store/useConsoleStore'
+import { drawRegionMagnifier } from '../../../utils/draw'
 import styles from './RoiOverlay.module.css'
 
 /* ---- utils ---- */
@@ -120,6 +121,9 @@ export function RoiOverlay(props: { anchorRef: React.RefObject<HTMLElement | nul
     // drag state (raw canvas-pixel coords)
     let dragSX = 0, dragSY = 0, dragCX = 0, dragCY = 0
     let dragging = false
+    let ctrlHeld = false
+    let cursorInside = false
+    let cursorX = 0, cursorY = 0
 
     function getCtx() {
       const ctx = canvas.getContext('2d')
@@ -159,6 +163,10 @@ export function RoiOverlay(props: { anchorRef: React.RefObject<HTMLElement | nul
           const pv = (s.mode === 'poly' && !s.closed) ? previewRef.current : undefined
           drawPoly(ctx, s.polygon, r.width, r.height, src.w, src.h, pv, s.closed)
         }
+        if (ctrlHeld && cursorInside && (anchor.tagName === 'VIDEO' || anchor.tagName === 'IMG')) {
+          drawRegionMagnifier(ctx, anchor as HTMLVideoElement | HTMLImageElement, canvas,
+            { x: cursorX, y: cursorY }, r.width, r.height, src.w, src.h)
+        }
       })
     }
 
@@ -185,6 +193,9 @@ export function RoiOverlay(props: { anchorRef: React.RefObject<HTMLElement | nul
       const { x, y } = canvasXY(e)
       dragCX = x
       dragCY = y
+      cursorX = x
+      cursorY = y
+      cursorInside = true
       redraw()
     }
     function onDocUp() {
@@ -257,9 +268,18 @@ export function RoiOverlay(props: { anchorRef: React.RefObject<HTMLElement | nul
     function onMouseMove(e: MouseEvent) {
       const s = roiRef.current
       if (!s.enabled || s.closed) return
-      if (s.mode === 'rect') return // rect preview handled by document listener
 
       const { x, y } = canvasXY(e)
+      cursorX = x
+      cursorY = y
+      cursorInside = true
+      if (s.mode === 'rect') {
+        // rect preview is handled by the document listener; only the lens needs
+        // a redraw when Ctrl is held before dragging starts.
+        if (ctrlHeld) redraw()
+        return
+      }
+
       const r = canvasRect()
       const src = anchorSrc()
       if (!src) return
@@ -269,13 +289,43 @@ export function RoiOverlay(props: { anchorRef: React.RefObject<HTMLElement | nul
       redraw()
     }
 
+    function onMouseEnter(e: MouseEvent) {
+      const { x, y } = canvasXY(e)
+      cursorX = x
+      cursorY = y
+      cursorInside = true
+      if (ctrlHeld) redraw()
+    }
+
     function onMouseLeave() {
+      cursorInside = false
       const s = roiRef.current
       if (s.mode === 'poly') {
         previewRef.current = undefined
         setPreview(undefined)
         redraw()
+      } else {
+        redraw()
       }
+    }
+
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key === 'Control' && !ctrlHeld) {
+        ctrlHeld = true
+        redraw()
+      }
+    }
+
+    function onKeyUp(e: KeyboardEvent) {
+      if (e.key === 'Control' && ctrlHeld) {
+        ctrlHeld = false
+        redraw()
+      }
+    }
+
+    function onWindowBlur() {
+      ctrlHeld = false
+      redraw()
     }
 
     function onDblClick() {
@@ -292,8 +342,12 @@ export function RoiOverlay(props: { anchorRef: React.RefObject<HTMLElement | nul
 
     canvas.addEventListener('mousedown', onMouseDown)
     canvas.addEventListener('mousemove', onMouseMove)
+    canvas.addEventListener('mouseenter', onMouseEnter)
     canvas.addEventListener('mouseleave', onMouseLeave)
     canvas.addEventListener('dblclick', onDblClick)
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+    window.addEventListener('blur', onWindowBlur)
 
     /* ---- resize observer on anchor ---- */
     let ro: ResizeObserver | null = null
@@ -324,11 +378,15 @@ export function RoiOverlay(props: { anchorRef: React.RefObject<HTMLElement | nul
       alive = false
       canvas.removeEventListener('mousedown', onMouseDown)
       canvas.removeEventListener('mousemove', onMouseMove)
+      canvas.removeEventListener('mouseenter', onMouseEnter)
       canvas.removeEventListener('mouseleave', onMouseLeave)
       canvas.removeEventListener('dblclick', onDblClick)
       // 拖拽中卸载也要清理 document 级监听
       document.removeEventListener('mousemove', onDocMove)
       document.removeEventListener('mouseup', onDocUp)
+      window.removeEventListener('keydown', onKeyDown)
+      window.removeEventListener('keyup', onKeyUp)
+      window.removeEventListener('blur', onWindowBlur)
       dragging = false
       window.removeEventListener('resize', onResize)
       ro?.disconnect()

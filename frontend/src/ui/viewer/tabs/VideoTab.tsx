@@ -412,7 +412,12 @@ export function VideoTab() {
       </div>
 
       <div className={styles.meta}>{t('video.analysisHint')}</div>
-      {editTool !== 'none' && <div className={styles.meta}>{t(editTool === 'line' ? 'video.lineHint' : editTool === 'zone' ? 'video.zoneHint' : editTool === 'cue' ? 'video.cueHint' : 'video.integrityHint')}</div>}
+      {editTool !== 'none' && (
+        <div className={styles.meta}>
+          {t(editTool === 'line' ? 'video.lineHint' : editTool === 'zone' ? 'video.zoneHint' : editTool === 'cue' ? 'video.cueHint' : 'video.integrityHint')}
+          {' · '}{t('video.magnifierHint')}
+        </div>
+      )}
       {report && <div role="status" className={styles.meta}>
         {t(`video.${report.status}`)} · {formatVideoTime(report.analyzedSeconds)} / {formatVideoTime(report.duration)} · {report.frames} {t('video.frames')} · {report.events.length} {t('video.events')}
       </div>}

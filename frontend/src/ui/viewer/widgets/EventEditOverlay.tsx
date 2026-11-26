@@ -1,6 +1,6 @@
 import { forwardRef, useCallback, useEffect, useImperativeHandle, useRef, useState } from 'react'
 import { useConsoleStore, type CountingLine, type CountingZone, type IntegrityRegion, type RoiPointXY } from '../../../store/useConsoleStore'
-import { fitContain } from '../../../utils/draw'
+import { drawRegionMagnifier, fitContain } from '../../../utils/draw'
 import styles from './EventEditOverlay.module.css'
 
 type Mode = 'line' | 'zone' | 'cue' | 'integrity'
@@ -57,6 +57,32 @@ export const EventEditOverlay = forwardRef<EventEditOverlayHandle, {
   const [cueDraft, setCueDraft] = useState<RoiPointXY[]>([])
   const [integrityDraft, setIntegrityDraft] = useState<RoiPointXY[]>([])
   const [hoverPt, setHoverPt] = useState<RoiPointXY | null>(null)
+  const lensRef = useRef<{ x: number; y: number; ctrl: boolean } | null>(null)
+  const ctrlRef = useRef(false)
+  const [lensTick, setLensTick] = useState(0)
+
+  // The magnifier follows the last pointer position; key events trigger a redraw
+  // so pressing/releasing Ctrl works even when the mouse is still.
+  useEffect(() => {
+    if (!props.enabled) return
+    const update = (held: boolean) => {
+      if (ctrlRef.current === held) return
+      ctrlRef.current = held
+      if (lensRef.current) lensRef.current.ctrl = held
+      setLensTick((value) => value + 1)
+    }
+    const down = (e: KeyboardEvent) => { if (e.key === 'Control') update(true) }
+    const up = (e: KeyboardEvent) => { if (e.key === 'Control') update(false) }
+    const blur = () => update(false)
+    window.addEventListener('keydown', down)
+    window.addEventListener('keyup', up)
+    window.addEventListener('blur', blur)
+    return () => {
+      window.removeEventListener('keydown', down)
+      window.removeEventListener('keyup', up)
+      window.removeEventListener('blur', blur)
+    }
+  }, [props.enabled])
 
   // 单一提交入口：起点闭合、双击、工具栏“完成绘制”按钮共用。
   const commitDraft = useCallback((): boolean => {
@@ -309,6 +335,15 @@ export const EventEditOverlay = forwardRef<EventEditOverlayHandle, {
           ctx.fill()
         }
       }
+
+      const lens = lensRef.current
+      if (lens?.ctrl && (anchor.tagName === 'VIDEO' || anchor.tagName === 'IMG')) {
+        const color = props.mode === 'line' ? 'rgba(255, 215, 0, 0.95)'
+          : props.mode === 'zone' ? 'rgba(255, 99, 132, 0.95)'
+            : props.mode === 'cue' ? 'rgba(34, 221, 255, 0.95)' : 'rgba(255, 193, 7, 0.95)'
+        drawRegionMagnifier(ctx, anchor as HTMLVideoElement | HTMLImageElement, canvas, lens,
+          r.width, r.height, src.w, src.h, { color })
+      }
     }
 
     draw()
@@ -319,7 +354,7 @@ export const EventEditOverlay = forwardRef<EventEditOverlayHandle, {
       ro.disconnect()
       window.removeEventListener('resize', draw)
     }
-  }, [eventsConfig, previewLine, zoneDraft, cueDraft, integrityDraft, hoverPt, props.mode, props.anchorRef])
+  }, [eventsConfig, previewLine, zoneDraft, cueDraft, integrityDraft, hoverPt, lensTick, props.mode, props.anchorRef])
 
   if (!props.enabled) return null
 
@@ -329,12 +364,21 @@ export const EventEditOverlay = forwardRef<EventEditOverlayHandle, {
       className={`${styles.canvas} ${roiEnabled ? '' : styles.active}`}
       onPointerMove={(e) => {
         const rect = (e.currentTarget as HTMLCanvasElement).getBoundingClientRect()
+        const x = e.clientX - rect.left
+        const y = e.clientY - rect.top
+        const ctrl = e.ctrlKey || ctrlRef.current
+        lensRef.current = { x, y, ctrl }
+        if (ctrl) setLensTick((value) => value + 1)
         const src = getSourceSize(props.anchorRef.current)
         if (!src) return
-        const p = displayToSrcNorm(e.clientX - rect.left, e.clientY - rect.top, rect.width, rect.height, src.w, src.h)
+        const p = displayToSrcNorm(x, y, rect.width, rect.height, src.w, src.h)
         setHoverPt(p)
       }}
-      onPointerLeave={() => setHoverPt(null)}
+      onPointerLeave={() => {
+        lensRef.current = null
+        setHoverPt(null)
+        setLensTick((value) => value + 1)
+      }}
       onPointerDown={(e) => {
         if (e.pointerType === 'mouse' && e.button !== 0) return
         const rect = (e.currentTarget as HTMLCanvasElement).getBoundingClientRect()

@@ -48,6 +48,7 @@
     "zoneHint": "Click polygon vertices, then click the first point to close (at least three vertices); Esc cancels the open draft, clicking the button again finishes drawing.",
     "cueHint": "Outline the red LED strip area on the door frame, then click the first point to close (at least three vertices); Esc cancels the open draft, clicking the button again finishes drawing.",
     "integrityHint": "Outline a region that must stay static (e.g. a wall or gate), then click the first point to close (at least three vertices); Esc cancels the open draft, clicking the button again finishes drawing. Semantic analysis warns on persistent visual change inside it.",
+    "magnifierHint": "Hold Ctrl for a 3× magnifier for precise placement.",
     "running": "Analyzing",
     "completed": "Completed",
     "stopped": "Stopped (partial results)",

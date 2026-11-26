@@ -227,3 +227,108 @@ export function drawTrails(ctx: CanvasRenderingContext2D, trail: TrailMap, fc: F
     ctx.stroke()
   }
 }
+
+export type MagnifierGeometry = {
+  sourceX: number
+  sourceY: number
+  sourceHalf: number
+  displayHalf: number
+}
+
+/** Map the lens centre to source pixels for precise region drawing. */
+export function magnifierGeometry(
+  cursor: { x: number; y: number },
+  rectW: number,
+  rectH: number,
+  srcW: number,
+  srcH: number,
+  zoom = 3,
+  radius = 72,
+): MagnifierGeometry | null {
+  if (rectW <= 0 || rectH <= 0 || srcW <= 0 || srcH <= 0 || zoom <= 0 || radius <= 0) return null
+  if (cursor.x < 0 || cursor.y < 0 || cursor.x > rectW || cursor.y > rectH) return null
+  const fc = fitContain(rectW, rectH, srcW, srcH)
+  const sourceX = (cursor.x - fc.offX) / fc.scale
+  const sourceY = (cursor.y - fc.offY) / fc.scale
+  if (sourceX < 0 || sourceY < 0 || sourceX > srcW || sourceY > srcH) return null
+  return {
+    sourceX,
+    sourceY,
+    sourceHalf: radius / (fc.scale * zoom),
+    displayHalf: radius / zoom,
+  }
+}
+
+/**
+ * Draw a circular zoom lens over the drawing canvas. The underlying image is
+ * sampled from the video/image and the canvas itself is magnified a second
+ * time, so the in-progress polygon/line also appears enlarged.
+ */
+export function drawRegionMagnifier(
+  ctx: CanvasRenderingContext2D,
+  anchor: HTMLVideoElement | HTMLImageElement,
+  canvas: HTMLCanvasElement,
+  cursor: { x: number; y: number },
+  rectW: number,
+  rectH: number,
+  srcW: number,
+  srcH: number,
+  options: { zoom?: number; radius?: number; color?: string } = {},
+) {
+  const zoom = options.zoom ?? 3
+  const radius = options.radius ?? 72
+  const color = options.color ?? 'rgba(45, 212, 255, 0.95)'
+  const geometry = magnifierGeometry(cursor, rectW, rectH, srcW, srcH, zoom, radius)
+  if (!geometry) return
+  if (anchor instanceof HTMLVideoElement && anchor.readyState < 2) return
+  if (anchor instanceof HTMLImageElement && !anchor.complete) return
+
+  const { x, y } = cursor
+  ctx.save()
+  ctx.beginPath()
+  ctx.arc(x, y, radius, 0, Math.PI * 2)
+  ctx.clip()
+
+  ctx.fillStyle = 'rgba(8, 12, 18, 0.94)'
+  ctx.fillRect(x - radius, y - radius, radius * 2, radius * 2)
+
+  const { sourceX, sourceY, sourceHalf, displayHalf } = geometry
+  ctx.drawImage(
+    anchor,
+    sourceX - sourceHalf, sourceY - sourceHalf, sourceHalf * 2, sourceHalf * 2,
+    x - radius, y - radius, radius * 2, radius * 2,
+  )
+
+  // Magnify the already-drawn vectors/drafts from the overlay canvas. Source
+  // coordinates are bitmap pixels; destination uses the current CSS transform.
+  const dprX = canvas.width / rectW
+  const dprY = canvas.height / rectH
+  ctx.drawImage(
+    canvas,
+    (x - displayHalf) * dprX, (y - displayHalf) * dprY, displayHalf * 2 * dprX, displayHalf * 2 * dprY,
+    x - radius, y - radius, radius * 2, radius * 2,
+  )
+  ctx.restore()
+
+  ctx.save()
+  ctx.beginPath()
+  ctx.arc(x, y, radius, 0, Math.PI * 2)
+  ctx.strokeStyle = 'rgba(0, 0, 0, 0.8)'
+  ctx.lineWidth = 4
+  ctx.stroke()
+  ctx.strokeStyle = color
+  ctx.lineWidth = 1.5
+  ctx.stroke()
+
+  ctx.strokeStyle = 'rgba(255, 255, 255, 0.7)'
+  ctx.lineWidth = 1
+  ctx.beginPath()
+  ctx.moveTo(x - 9, y); ctx.lineTo(x + 9, y)
+  ctx.moveTo(x, y - 9); ctx.lineTo(x, y + 9)
+  ctx.stroke()
+  ctx.beginPath()
+  ctx.arc(x, y, 2.5, 0, Math.PI * 2)
+  ctx.fillStyle = color
+  ctx.fill()
+  ctx.restore()
+}
