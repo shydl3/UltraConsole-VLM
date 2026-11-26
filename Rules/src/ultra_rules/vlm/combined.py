@@ -19,7 +19,7 @@ from .cues import _Hysteresis, _red_ratio, _roi_mask
 from .cues import cache_key as cue_cache_key
 from .integrity import _ZoneRuntime
 from .integrity import cache_key as integrity_cache_key
-from .media import SampleSchedule, decoded
+from .media import SampleSchedule, decoded, truncation_info
 from .observations import (
     OBSERVATION_COMMIT_ROWS,
     OBSERVATION_PROGRESS_ROWS,
@@ -102,7 +102,7 @@ def detect_run(run_dir: Path) -> None:
     zone_schedules = {zone.id: SampleSchedule(zone.sampleFps) for zone in zones if integrity_needed}
 
     progress(run_dir, stage="detect", cueCount=len(cues), zoneCount=len(zones))
-    for _index, t, _source, frame in decoded(source, meta):
+    for _index, t, _source, frame in decoded(source, meta, truncate_on_error=True):
         bgr = None
         for cue in cues:
             if not cue_needed or not cue_schedules[cue.id].accept(t):
@@ -141,13 +141,14 @@ def detect_run(run_dir: Path) -> None:
     else:
         integrity_result = integrity_cached
 
+    truncation = truncation_info(meta)
     if cues:
         write_json(run_dir / "cues.json", {"cues": cue_result})
-        progress(run_dir, stage="cues", cueCount=len(cues))
+        progress(run_dir, stage="cues", cueCount=len(cues), **truncation)
     if zones:
         _copy_sidecar(integrity_sidecar, run_dir / "previews")
         write_json(run_dir / "integrity.json", {"zones": integrity_result})
-        progress(run_dir, stage="integrity", zoneCount=len(zones), integrityFraction=1)
+        progress(run_dir, stage="integrity", zoneCount=len(zones), integrityFraction=1, **truncation)
 
 
 def _track_and_detect(run_dir: Path, config: dict, request: RunRequest) -> None:
@@ -235,7 +236,7 @@ def _track_and_detect(run_dir: Path, config: dict, request: RunRequest) -> None:
 
         progress(run_dir, stage="tracking", sampledFrames=0, candidateCount=0, cacheHit=False,
                  poseBatch=batch, pipeline=pipeline)
-        frames = decoded(source, meta)
+        frames = decoded(source, meta, truncate_on_error=True)
         if pipeline:
             pipe = _FramePipeline(frames, maxsize=max(8, batch * 2), convert=False)
             items = pipe.rows()
@@ -345,11 +346,12 @@ def _track_and_detect(run_dir: Path, config: dict, request: RunRequest) -> None:
         writer.close()
         writer = None
         os.replace(tmp, cache)
+        truncation = truncation_info(meta)
         write_json(run_dir / "observations.ref.json",
-                   {"path": str(cache), "fingerprint": fingerprint, "cacheHit": False})
+                   {"path": str(cache), "fingerprint": fingerprint, "cacheHit": False, **truncation})
         progress(run_dir, stage="tracking", sampledFrames=count, candidateCount=candidates, mediaTimeSec=last_t,
                  trackingFraction=1, trackingSeconds=time.perf_counter() - started,
-                 actualPoseFps=(count - 1) / last_t if last_t else 0)
+                 actualPoseFps=(count - 1) / last_t if last_t else 0, **truncation)
 
         if cue_needed:
             cue_result = {cue.id: {"intervals": cue_runtimes[cue.id].finish()} for cue in cues}

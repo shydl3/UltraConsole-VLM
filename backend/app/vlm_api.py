@@ -114,7 +114,8 @@ def _pump():
                     return
                 except Exception as exc:
                     error = f"Worker launch failed: {exc}"
-            write_json(folder / "status.json", {"runId": folder.name,
+            previous = read_json(folder / "status.json") if (folder / "status.json").exists() else {}
+            write_json(folder / "status.json", {**previous, "runId": folder.name,
                                                 "videoId": config.get("request", {}).get("videoId"),
                                                 "fileName": config.get("video", {}).get("fileName"),
                                                 "videoDurationSec": config.get("video", {}).get("durationSec"),
@@ -575,11 +576,6 @@ def _start_run(request: RunRequest, snapshot: dict | None = None):
 def get_run(run_id: str):
     folder = directory("runs", run_id)
     result = vlm_jobs.status(folder)
-    # Same clock as the library list: from "start analysis" to finishedAt (or now).
-    started = result.get("startedAt")
-    if started is not None:
-        finished = result.get("finishedAt")
-        result["durationSec"] = max(0.0, (finished if finished is not None else time.time()) - started)
     if (folder / "request.json").exists():
         config = read_json(folder / "request.json")
         request = {**config.get("request", {})}

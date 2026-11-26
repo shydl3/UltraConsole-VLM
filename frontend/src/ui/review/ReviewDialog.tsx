@@ -40,6 +40,18 @@ export function ReviewDialog({ target, onClose, standalone = false }: {
   // preview exists.
   const duration = data.run?.durationSec ?? null
   const videoDuration = data.run?.videoDurationSec ?? null
+  const phaseOrder = ['segment', 'tracking', 'detect', 'cues', 'integrity', 'understanding']
+  const phaseEntries = Object.entries(data.run?.phaseSeconds ?? {})
+    .filter(([, seconds]) => Number.isFinite(seconds) && seconds > 0)
+    .sort(([a], [b]) => phaseOrder.indexOf(a) - phaseOrder.indexOf(b))
+  const truncated = Boolean(data.run?.summary?.truncated ?? data.run?.progress?.truncated)
+  const fallbackFrames = data.run?.summary?.timestampFallbackFrames ?? data.run?.progress?.timestampFallbackFrames ?? 0
+  const processedDuration = data.run?.summary?.processedDurationSec ?? data.run?.progress?.truncatedAtSec ?? null
+  const sourceDuration = data.run?.summary?.sourceDurationSec ?? videoDuration
+  const truncationReason = data.run?.summary?.truncationReason ?? data.run?.progress?.truncationReason ?? 'unknown'
+  const truncationLabel = ['non_monotonic_timestamp', 'decode_error'].includes(truncationReason)
+    ? t(`review.truncation.${truncationReason}`)
+    : t('review.truncation.unknown')
 
   useEffect(() => {
     // Inside the detached window the dialog is the page itself: non-modal, filling
@@ -163,6 +175,19 @@ export function ReviewDialog({ target, onClose, standalone = false }: {
           <button type="button" onClick={data.reload} disabled={data.loading}>{t('library.refresh')}</button>
           <button type="button" className={styles.close} onClick={onClose} aria-label={t('review.close')}>×</button>
         </div>
+        {isRun && phaseEntries.length > 0 && <div className={styles.phases} aria-label={t('review.phaseTimings')}>
+          {phaseEntries.map(([phase, seconds]) => <span key={phase}>{t(`vlm.${phase}`)} {formatDuration(seconds, t)}</span>)}
+        </div>}
+        {isRun && truncated && <div className={styles.warning}>
+          {t('review.truncated', {
+            processed: formatDuration(processedDuration, t),
+            total: formatDuration(sourceDuration, t),
+            reason: truncationLabel,
+          })}
+        </div>}
+        {isRun && !truncated && fallbackFrames > 0 && <div className={styles.warning}>
+          {t('review.timestampRepaired', { count: fallbackFrames })}
+        </div>}
       </div>
       <div className={[styles.layout, isRun ? '' : styles.layoutSingle].filter(Boolean).join(' ')}>
         <div className={styles.left}>

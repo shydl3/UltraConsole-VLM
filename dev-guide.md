@@ -27,6 +27,8 @@ understanding
 - `detect` 由 `Rules/src/ultra_rules/vlm/combined.py` 实现；tracking、cue、integrity 共享同一次解码，避免长视频重复解码。
 - `understanding` 由 `qwen_worker.understand()` 驱动；确定性结论不调用模型，`uncertain` 才进入 Qwen 复核。
 - 阶段状态写入 `status.json` / `progress.json`；阶段失败、取消、超时由 `runner.py` 管理。
+- 耗时口径：`startedAt` 是历史入队时钟；`startedRunningAt`（worker 实际开始）是未来 run 的 `durationSec` 起点，排队时间不计入、不展示；`queuedAt` 仅留审计。runner 另写 `phaseSeconds` 供复核窗口展示阶段耗时。
+- 时间戳异常：单帧缺失 PTS 按上一帧 + 帧间隔修复并累计 `timestampFallbackFrames`；真实 PTS 回退/解码错误在分析阶段截断到最后一个可用帧，run 置 `partial`，summary 记录 `truncatedAtSec` / `processedDurationSec` / `truncationReason`。
 - 观测缓存以 gzip + 指纹保存；改规则通常命中缓存，只重算候选/判定。
 
 ### 1.2 候选事件如何产生

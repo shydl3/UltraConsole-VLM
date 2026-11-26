@@ -6,6 +6,15 @@
 
 ## 2026-11-26
 
+### 处理时长从实际开始计算 + 阶段耗时
+
+- run 状态新增 `queuedAt`（入队，仅审计）与 `startedRunningAt`（worker 实际开始）；未来 run 的 `durationSec` 从 `startedRunningAt` 计算，**排队时间不再计入，也不再展示**。
+- 仍在排队的新 run `durationSec` 为空，UI 显示 `—`；历史 run 没有拆分时钟时继续使用原 `startedAt` 语义（不做迁移）。
+- 复核窗口与分析记录列表只显示“处理时长 + 视频时长”；排队时长不作为 UI 指标。
+- runner 记录 `phaseSeconds`（segment/tracking/detect/cues/integrity/understanding）；复核窗口展示阶段耗时。
+- `decoded(truncate_on_error=True)`：遇到真实 PTS 回退或解码错误时，停止在最后一个可用帧，`progress` / `summary` 记录 `truncated`、`truncatedAtSec`、`truncationReason`、`processedDurationSec`；复核窗口显示“仅处理前 X / 共 Y”的警告，run 状态置为 `partial`。
+- 单帧缺失 PTS 不截断，按“上一帧 + 一帧间隔”修复并累计 `timestampFallbackFrames`；UI 提示“N 帧缺失时间戳已修复”。`_3` 属于这一类，因此完整处理并提示，而不是中途失败。
+
 ### 分析记录视频时长
 
 - 创建 run 时把已探测的视频时长写入 `status.json` 的 `videoDurationSec`；历史 run 由 `vlm_jobs.status` 从 `request.json` 回填。

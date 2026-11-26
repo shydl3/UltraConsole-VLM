@@ -14,7 +14,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from .contracts import CueDefinition, RunRequest
-from .media import sampled
+from .media import sampled, truncation_info
 from .storage import digest, progress, read_json, write_json
 
 CUE_VERSION = "cues-v1"
@@ -95,7 +95,7 @@ def detect_timeline(source: Path, meta: dict, cue: CueDefinition):
     def signal():
         # Stream samples into the hysteresis fold: a 24h pass at 10 fps would keep
         # ~hundreds of thousands of tuples alive if buffered as a list.
-        for _index, t, _source, frame in sampled(source, meta, cue.sampleFps):
+        for _index, t, _source, frame in sampled(source, meta, cue.sampleFps, truncate_on_error=True):
             bgr = frame.to_ndarray(format="bgr24")
             crop = bgr[y0:y1, x0:x1]
             if crop.size == 0:
@@ -123,7 +123,7 @@ def detect_all(source: Path, meta: dict, cues: list[CueDefinition]):
     for cue in cues:
         groups[float(cue.sampleFps)].append(cue)
     for fps, group in groups.items():
-        for _index, t, _source, frame in sampled(source, meta, fps):
+        for _index, t, _source, frame in sampled(source, meta, fps, truncate_on_error=True):
             bgr = frame.to_ndarray(format="bgr24")
             for cue in group:
                 _cue, mask, (x0, y0, x1, y1), fold = prepared[cue.id]
@@ -236,4 +236,4 @@ def detect_run(run_dir: Path):
         cache.parent.mkdir(parents=True, exist_ok=True)
         cache.write_text(json.dumps(result, ensure_ascii=False, allow_nan=False), encoding="utf-8")
     write_json(run_dir / "cues.json", {"cues": result})
-    progress(run_dir, stage="cues", cueCount=len(request.cues))
+    progress(run_dir, stage="cues", cueCount=len(request.cues), **truncation_info(meta))

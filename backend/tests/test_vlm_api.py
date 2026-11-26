@@ -47,7 +47,10 @@ def test_upload_start_results_auth_and_range(client, tmp_path, monkeypatch, loca
     def fake_launch(folder, python):
         assert jobs.read_json(folder / 'request.json')['modelPath'] == str(local_vlm_models[1])
         state = json.loads((folder / "status.json").read_text())
-        write_json(folder / "status.json", {**state, "state": "completed"})
+        now = time.time()
+        write_json(folder / "status.json", {**state, "state": "completed",
+                                            "startedRunningAt": state.get("startedAt") or now,
+                                            "finishedAt": now})
         (folder / "results.jsonl").write_text(json.dumps({"trackId": 7, "decision": "uncertain", "eventDefinitionId": "e",
                                                         "videoDescription": "目标走向门框，随后被旁人遮挡。", "reason": "后续动作看不清。"}) + "\n")
     monkeypatch.setattr(jobs, "launch", fake_launch)
@@ -514,3 +517,32 @@ def test_status_backfills_video_duration_from_request(tmp_path):
     write_json(run / "status.json", {"runId": "run", "state": "completed", "startedAt": 100, "finishedAt": 110})
     write_json(run / "request.json", {"video": {"durationSec": 123.4}})
     assert jobs.status(run)["videoDurationSec"] == 123.4
+
+
+def test_status_duration_starts_at_actual_running_time(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    write_json(run / "status.json", {"runId": "run", "state": "completed", "startedAt": 100,
+                                     "queuedAt": 100, "startedRunningAt": 130, "finishedAt": 160})
+    result = jobs.status(run)
+    assert result["durationSec"] == 30
+    assert "queuedDurationSec" not in result
+    assert "computeDurationSec" not in result
+
+
+def test_status_queued_run_has_no_compute_duration(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    write_json(run / "status.json", {"runId": "run", "state": "queued", "startedAt": 100,
+                                     "queuedAt": 100, "startedRunningAt": None})
+    assert jobs.status(run)["durationSec"] is None
+
+
+def test_status_keeps_legacy_duration_for_old_runs(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    write_json(run / "status.json", {"runId": "run", "state": "completed", "startedAt": 100, "finishedAt": 160})
+    result = jobs.status(run)
+    assert result["durationSec"] == 60
+    assert "queuedDurationSec" not in result
+    assert "computeDurationSec" not in result

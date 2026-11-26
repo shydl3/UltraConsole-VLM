@@ -28,25 +28,63 @@ def probe(path: Path):
                 "frameCount": stream.frames, "timeOriginSec": float(first.time or 0), "timeBase": str(stream.time_base)}
 
 
-def decoded(path: Path, meta: dict):
+TRUNCATION_KEYS = ("truncated", "truncatedAtSec", "truncationReason", "truncationError",
+                   "timestampFallbackFrames")
+
+
+def truncation_info(meta: dict) -> dict:
+    return {key: meta[key] for key in TRUNCATION_KEYS if key in meta}
+
+
+def _frame_timestamp(index: int, frame_time, fps: float, origin: float, last: float):
+    """Resolve a frame time without ever going backwards on a missing PTS.
+
+    MPEG-PS/HEVC tails sometimes contain a damaged frame whose decoder output
+    has no timestamp. Falling back to ``index / fps`` can be a few milliseconds
+    behind the previous PTS near the end of the file; use the previous timestamp
+    plus one frame period instead.
+    """
+    if frame_time is None:
+        return (last + 1.0 / fps if last >= 0 else index / fps), "frame_index"
+    return float(frame_time) - origin, "pts"
+
+
+def decoded(path: Path, meta: dict, *, truncate_on_error: bool = False):
+    """Decode frames, optionally truncating at the first unusable timestamp.
+
+    ``truncate_on_error=True`` is used by analysis phases: the prefix before a
+    real PTS rewind / decoder failure is still analyzable and is marked in
+    ``meta`` (``truncated``, ``truncatedAtSec``, ``truncationReason``). Missing
+    PTS on an individual frame is repaired with the previous timestamp + one
+    frame period and counted in ``timestampFallbackFrames``.
+    """
     with av.open(str(path)) as container:
         stream = container.streams.video[0]
         stream.thread_type = "AUTO"
         last = -1.0
-        for index, frame in enumerate(container.decode(stream)):
-            if frame.time is None:
-                timestamp, source = index / meta["fps"], "frame_index"
-            else:
-                timestamp, source = float(frame.time) - meta["timeOriginSec"], "pts"
-            if timestamp < last - 1e-6:
-                raise ValueError("Non-monotonic video timestamps; remux video before analysis")
-            last = timestamp
-            yield index, timestamp, source, frame
+        try:
+            for index, frame in enumerate(container.decode(stream)):
+                if frame.time is None:
+                    meta["timestampFallbackFrames"] = meta.get("timestampFallbackFrames", 0) + 1
+                timestamp, source = _frame_timestamp(index, frame.time, meta["fps"], meta["timeOriginSec"], last)
+                if timestamp < last - 1e-6:
+                    if truncate_on_error:
+                        meta.update(truncated=True, truncatedAtSec=max(0.0, last),
+                                    truncationReason="non_monotonic_timestamp")
+                        return
+                    raise ValueError("Non-monotonic video timestamps; remux video before analysis")
+                last = timestamp
+                yield index, timestamp, source, frame
+        except Exception as exc:
+            if not truncate_on_error:
+                raise
+            meta.update(truncated=True, truncatedAtSec=max(0.0, last),
+                        truncationReason="decode_error", truncationError=str(exc))
 
 
-def sampled(path: Path, meta: dict, fps: float):
+def sampled(path: Path, meta: dict, fps: float, *, truncate_on_error: bool = False):
     target = 0.0
-    for index, timestamp, source, frame in decoded(path, meta):
+    for index, timestamp, source, frame in decoded(path, meta, truncate_on_error=truncate_on_error):
         if timestamp + 1e-6 < target:
             continue
         yield index, timestamp, source, frame

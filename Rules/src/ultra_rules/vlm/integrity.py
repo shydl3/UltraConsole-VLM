@@ -21,7 +21,7 @@ from PIL import Image, ImageDraw
 
 from .contracts import IntegrityZone, RunRequest
 from .cues import _otsu
-from .media import sampled
+from .media import sampled, truncation_info
 from .storage import digest, progress, read_json, write_json
 
 INTEGRITY_VERSION = "integrity-v3"
@@ -453,7 +453,7 @@ def detect_timeline(source: Path, meta: dict, zone: IntegrityZone,
                     observations: Path | None = None, evidence_dir: Path | None = None) -> dict:
     runtime = _ZoneRuntime(source, zone, meta, observations, evidence_dir)
     try:
-        for _index, t, _source, frame in sampled(source, meta, zone.sampleFps):
+        for _index, t, _source, frame in sampled(source, meta, zone.sampleFps, truncate_on_error=True):
             runtime.feed(t, frame.to_ndarray(format="bgr24"))
         return runtime.finish()
     finally:
@@ -532,4 +532,5 @@ def detect_run(run_dir: Path) -> None:
             if not target.exists():
                 shutil.copy2(image, target)
     write_json(run_dir / "integrity.json", {"zones": result})
-    progress(run_dir, stage="integrity", zoneCount=len(request.integrityZones), integrityFraction=1)
+    progress(run_dir, stage="integrity", zoneCount=len(request.integrityZones), integrityFraction=1,
+             **truncation_info(meta))

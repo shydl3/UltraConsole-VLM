@@ -32,9 +32,13 @@ def prepare(run_dir: Path, request: RunRequest, source: Path, video: dict, data_
     write_json(run_dir / "request.json", config)
     write_json(run_dir / "manifest.json", {"version": VERSION, "sourceSha256": video["sha256"],
                                            "configuration": config, "createdBy": "ultra_rules.vlm"})
+    queued_at = time.time()
     write_json(run_dir / "status.json", {"runId": run_dir.name, "videoId": request.videoId,
                                          "fileName": video["fileName"], "videoDurationSec": video.get("durationSec"),
-                                         "state": "queued", "startedAt": time.time()})
+                                         # startedAt stays the legacy enqueue clock; the executable
+                                         # split is queuedAt (enqueue) + startedRunningAt (worker start).
+                                         "state": "queued", "startedAt": queued_at, "queuedAt": queued_at,
+                                         "startedRunningAt": None})
     # Library display name: <video name>_<timestamp to minute>, so each run is
     # identifiable without relying on the internal random run id.
     write_json(run_dir / "library.json", {"displayName": f"{video['fileName']}_{time.strftime('%Y%m%d_%H%M')}"})

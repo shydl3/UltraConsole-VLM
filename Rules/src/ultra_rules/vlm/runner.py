@@ -8,6 +8,7 @@ import sys
 import time
 from pathlib import Path
 
+from .media import TRUNCATION_KEYS
 from .storage import read_json, write_json
 
 
@@ -95,9 +96,13 @@ def run(run_dir: Path):
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     child = None
     cancelled = False
-    # Preserve the timer set when the run was queued (in prepare), so the
-    # measured duration starts from "开始分析" rather than worker startup.
-    started = read_json(run_dir / "status.json").get("startedAt") or time.time()
+    initial = read_json(run_dir / "status.json")
+    # startedAt is the legacy enqueue clock. queuedAt is when the user clicked
+    # "start"; startedRunningAt is when a worker actually acquired the slot.
+    started = initial.get("startedAt") or time.time()
+    queued_at = initial.get("queuedAt") or started
+    started_running = initial.get("startedRunningAt") or time.time()
+    phase_seconds = dict(initial.get("phaseSeconds") or {})
 
     def signal_cancel(_signum, _frame):
         nonlocal cancelled
@@ -110,7 +115,9 @@ def run(run_dir: Path):
         write_json(run_dir / "status.json", {"runId": run_dir.name, "videoId": config["request"]["videoId"],
                                             "fileName": config["video"]["fileName"],
                                             "videoDurationSec": config["video"].get("durationSec"),
-                                            "state": state, "startedAt": started,
+                                            "state": state, "startedAt": started, "queuedAt": queued_at,
+                                            "startedRunningAt": started_running,
+                                            "phaseSeconds": phase_seconds,
                                             "updatedAt": time.time(), **extra})
 
     write_json(run_dir / "owner.json", {"pid": os.getpid(), "identity": process_identity(os.getpid())})
@@ -125,37 +132,59 @@ def run(run_dir: Path):
                 if cancelled or (run_dir / "cancel.requested").exists():
                     cancelled = True
                     break
-                status(phase)
-                env = dict(os.environ, HF_HUB_OFFLINE="1", TOKENIZERS_PARALLELISM="false", PYTHONUNBUFFERED="1")
-                with (run_dir / f"{phase}.log").open("a") as log:
-                    child = subprocess.Popen([python, "-m", "ultra_rules.vlm.cli", phase, "--run-dir", str(run_dir)],
-                                             stdout=log, stderr=subprocess.STDOUT, env=env)
-                    timeout = phase_timeout(phase, config, run_dir)
-                    deadline = time.monotonic() + timeout
-                    while child.poll() is None:
-                        if cancelled or (run_dir / "cancel.requested").exists():
-                            cancelled = True
-                            child.terminate()
-                            try:
-                                child.wait(timeout=5)
-                            except subprocess.TimeoutExpired:
-                                child.kill()
-                                child.wait()
+                phase_started = time.monotonic()
+                try:
+                    status(phase)
+                    env = dict(os.environ, HF_HUB_OFFLINE="1", TOKENIZERS_PARALLELISM="false", PYTHONUNBUFFERED="1")
+                    with (run_dir / f"{phase}.log").open("a") as log:
+                        child = subprocess.Popen([python, "-m", "ultra_rules.vlm.cli", phase, "--run-dir", str(run_dir)],
+                                                 stdout=log, stderr=subprocess.STDOUT, env=env)
+                        timeout = phase_timeout(phase, config, run_dir)
+                        deadline = time.monotonic() + timeout
+                        while child.poll() is None:
+                            if cancelled or (run_dir / "cancel.requested").exists():
+                                cancelled = True
+                                child.terminate()
+                                try:
+                                    child.wait(timeout=5)
+                                except subprocess.TimeoutExpired:
+                                    child.kill()
+                                    child.wait()
+                                break
+                            if time.monotonic() > deadline:
+                                raise TimeoutError(f"{phase} exceeded {timeout}s")
+                            time.sleep(0.3)
+                        if cancelled:
                             break
-                        if time.monotonic() > deadline:
-                            raise TimeoutError(f"{phase} exceeded {timeout}s")
-                        time.sleep(0.3)
-                    if cancelled:
-                        break
-                    if child.returncode:
-                        tail = (run_dir / f"{phase}.log").read_text(errors="replace")[-3000:]
-                        raise RuntimeError(f"{phase} exited {child.returncode}: {tail}")
-                    child = None
+                        if child.returncode:
+                            tail = (run_dir / f"{phase}.log").read_text(errors="replace")[-3000:]
+                            raise RuntimeError(f"{phase} exited {child.returncode}: {tail}")
+                        child = None
+                    if phase == "detect":
+                        # The combined phase also records its tracking sub-time.
+                        progress_path = run_dir / "progress.json"
+                        if progress_path.exists():
+                            tracking = read_json(progress_path).get("trackingSeconds")
+                            if tracking is not None:
+                                phase_seconds["tracking"] = round(float(tracking), 3)
+                finally:
+                    phase_seconds[phase] = round(time.monotonic() - phase_started, 3)
             if cancelled:
                 status("cancelled", finishedAt=time.time())
             else:
                 summary = read_json(run_dir / "summary.json")
-                state = "partial" if summary["failedRequests"] else "completed"
+                progress_data = read_json(run_dir / "progress.json") if (run_dir / "progress.json").exists() else {}
+                ref = read_json(run_dir / "observations.ref.json") if (run_dir / "observations.ref.json").exists() else {}
+                for key in TRUNCATION_KEYS:
+                    if key in progress_data:
+                        summary[key] = progress_data[key]
+                    elif key in ref:
+                        summary[key] = ref[key]
+                if summary.get("truncated"):
+                    summary["processedDurationSec"] = float(summary.get("truncatedAtSec") or 0)
+                    summary["sourceDurationSec"] = float(config["video"].get("durationSec") or 0)
+                    write_json(run_dir / "summary.json", summary)
+                state = "partial" if summary["failedRequests"] or summary.get("truncated") else "completed"
                 if summary["failedRequests"] and summary["failedRequests"] == summary["resultCount"]:
                     state = "failed"
                 status(state, finishedAt=time.time(), summary=summary)

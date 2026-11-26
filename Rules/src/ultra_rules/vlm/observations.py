@@ -10,7 +10,7 @@ import time
 from pathlib import Path
 
 from .contracts import RunRequest
-from .media import sampled
+from .media import TRUNCATION_KEYS, sampled, truncation_info
 from .poi import PoiTracker
 from .storage import VERSION, append_json, digest, file_hash, progress, read_json, write_json
 
@@ -188,6 +188,13 @@ def track(run_dir: Path):
     cache = Path(config["cacheRoot"]) / f"{key}.jsonl.gz"
     cache.parent.mkdir(parents=True, exist_ok=True)
     cache_hit = cache.exists()
+    if cache_hit:
+        ref_path = run_dir / "observations.ref.json"
+        if ref_path.exists():
+            cached = read_json(ref_path)
+            for field in TRUNCATION_KEYS:
+                if field in cached:
+                    meta[field] = cached[field]
     progress(run_dir, stage="tracking", sampledFrames=0, candidateCount=0, cacheHit=cache_hit,
              poseBatch=batch, pipeline=pipeline)
     tracker = PoiTracker(request)
@@ -203,7 +210,7 @@ def track(run_dir: Path):
         adapter.load()
         if adapter._model.task != "pose":
             raise ValueError("Semantic analysis requires a pose model")
-        frames = sampled(source, meta, request.poseFps)
+        frames = sampled(source, meta, request.poseFps, truncate_on_error=True)
         pipe = _FramePipeline(frames, maxsize=max(8, batch * 2)) if pipeline else None
         if pipe is not None:
             items = pipe.rows()
@@ -269,10 +276,12 @@ def track(run_dir: Path):
         if writer:
             writer.close()
             os.replace(tmp, cache)
-        write_json(run_dir / "observations.ref.json", {"path": str(cache), "fingerprint": fingerprint, "cacheHit": cache_hit})
+        truncation = truncation_info(meta)
+        write_json(run_dir / "observations.ref.json", {"path": str(cache), "fingerprint": fingerprint,
+                                                       "cacheHit": cache_hit, **truncation})
         progress(run_dir, sampledFrames=count, candidateCount=candidates, mediaTimeSec=last_t,
                  trackingFraction=1, trackingSeconds=time.perf_counter() - started,
-                 actualPoseFps=(count - 1) / last_t if last_t else 0)
+                 actualPoseFps=(count - 1) / last_t if last_t else 0, **truncation)
     finally:
         db.close()
         if reader:

@@ -65,7 +65,7 @@ def bench(tmp_path, monkeypatch):
     monkeypatch.setattr("ultra_rules.pose_adapter.PoseAdapter", FakeAdapter)
 
     def setup(n_frames: int):
-        def fake_sampled(source, meta, fps):
+        def fake_sampled(source, meta, fps, **kwargs):
             for i in range(n_frames):
                 yield i, i / 10, "pts", FakeFrame(i)
 
@@ -172,7 +172,7 @@ def test_pipeline_backpressure_and_drain():
 
 
 def test_pipeline_producer_error_propagates(bench, monkeypatch):
-    def broken_sampled(source, meta, fps):
+    def broken_sampled(source, meta, fps, **kwargs):
         for i in range(5):
             yield i, i / 10, "pts", FakeFrame(i)
         raise RuntimeError("decode broke")

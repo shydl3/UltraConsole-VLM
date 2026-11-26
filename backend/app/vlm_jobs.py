@@ -87,6 +87,17 @@ def status(run_dir: Path):
         result["displayName"] = f"{base}_{time.strftime('%Y%m%d_%H%M', time.localtime(started))}" if started else base
     if cancelled and result["state"] not in TERMINAL:
         result["state"] = "cancelling"
+    end = result.get("finishedAt") or time.time()
+    running_at = result.get("startedRunningAt")
+    if running_at is not None:
+        # Future runs: queue wait is deliberately excluded from duration.
+        result["durationSec"] = max(0.0, end - running_at)
+    elif "queuedAt" in result:
+        # New run still waiting for a worker: there is no compute duration yet.
+        result["durationSec"] = None
+    elif result.get("startedAt") is not None:
+        # Historical runs without the split clock keep their old semantics.
+        result["durationSec"] = max(0.0, end - result["startedAt"])
     return result
 
 

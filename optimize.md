@@ -239,28 +239,30 @@
 
 ### P4：调度与吞吐
 
+> 状态：🔶 **部分完成（2026-11-26）**：`startedRunningAt` 已作为未来 run 的时长起点，`durationSec` 不再包含排队时间，UI 也不再展示排队时长；`queuedAt` 仅留审计。runner 记录 `phaseSeconds` 并展示阶段耗时。**待做**：ETA/队列位置、优先级、worker 分离、多 GPU 分片。
+
 **目标**：让多路摄像头/批量任务不再被单 worker 串行拖死。
 
 **现状**：
 
 - `backend/app/vlm_api.py`：`MAX_CONCURRENT = 1`；
 - `_pump()` 按 `startedAt` 顺序启动；
-- `startedAt` 在入队时写入，UI 把排队算进处理时长。
+- `startedAt` 仍是入队时钟；新字段 `startedRunningAt` 是实际开始，未来 run 的 `durationSec` 从它计算；`queuedAt` 仅审计，历史 run 回退原 `startedAt` 语义。
 
 **建议实现**：
 
-1. 分离 `queuedAt` / `startedAt` / `finishedAt`，UI 显示排队位置与 ETA。
-2. 支持优先级（例如人工触发 > 批量补跑）和取消排队任务。
-3. 评估把 pose/cue/integrity worker 与 Qwen worker 分离：CPU/IO 阶段与 GPU 推理可重叠。
-4. 多 GPU 时按视频或 segment 分片；单 GPU 保持串行，避免显存争用。
-5. 加入队列深度、运行中任务、平均阶段耗时的 API。
+1. ✅ 分离 `queuedAt` / `startedRunningAt` / `finishedAt`；未来 run 的时长只从实际开始计算，排队不展示。⬜ 排队位置与 ETA 仍待做。
+2. ⬜ 支持优先级（例如人工触发 > 批量补跑）和取消排队任务。
+3. ⬜ 评估把 pose/cue/integrity worker 与 Qwen worker 分离：CPU/IO 阶段与 GPU 推理可重叠。
+4. ⬜ 多 GPU 时按视频或 segment 分片；单 GPU 保持串行，避免显存争用。
+5. ✅ `phaseSeconds` 已进入 status 并在复核窗口展示；⬜ 队列深度/运行中任务/平均阶段耗时 API 仍待做。
 
 **验收**：
 
-- 批量 5 个任务时，UI 能区分“排队中/计算中”；
-- 不出现重复启动、状态卡死；
-- 重启后队列可恢复；
-- 有并发/优先级测试。
+- ✅ 未来 run 的 UI 时长从 worker 实际开始计算；排队时间不计入、不展示；
+- ✅ 不出现重复启动（提交锁 + active videoId 去重）；
+- ⬜ 重启后队列可恢复（已有队列落盘，未针对新字段做回归）；
+- ⬜ 有并发/优先级测试。
 
 ---
 
@@ -404,7 +406,7 @@ PYTHONPATH=Rules/src /home/raider/miniconda3/envs/ultraconsole/bin/python -c \
 | P1 | integrity 多区共享/降采样 | ✅ **第一版完成** | 多区共享解码；30min 真实任务 150s（仅 cues+integrity），输出一致 |
 | P2 | 证据预览 lazy | ✅ **完成** | 默认只写 manifest；API 首次访问按需生成；165 结果复算 0.41s、0 预览 |
 | P3 | tracking 调优 | 🔶 **I/O/缓存完成** | tracking 100.8s→89.3s，detect 193.6s→179.7s，零漂移；TensorRT/ONNX/FP16/NVDEC 待评测 |
-| P4 | 队列/ETA/worker 分离 | ⬜ 待做 | 多路生产的关键 |
+| P4 | 队列/ETA/worker 分离 | 🔶 **部分完成** | 时长从 startedRunningAt 计算、排队不展示；phaseSeconds 已展示；ETA/优先级/worker 分离待做 |
 | P5 | 信号质量治理 | ⬜ 待做 | 标定、聚合、`repeatSec` |
 | P6 | 存储与可观测性 | ⬜ 待做 | 指标、保留策略、失败告警 |
 
@@ -442,6 +444,12 @@ PYTHONPATH=Rules/src /home/raider/miniconda3/envs/ultraconsole/bin/python -c \
   - 实测（30min、9038 帧、batch16+pipeline+poseFps5）：tracking 100.8s → **89.3s**（-11.4%）；完整 detect 193.6s → **179.7s**（-7.2%）；observations 逐字段一致，bench diff 0 mismatch、bbox/kp delta 0.0。
   - 测试：`Rules/tests/test_tracking_io.py`。
   - 未做：TensorRT / ONNX / FP16 / NVDEC 独立评估。
+- **P4（部分完成）**：
+  - `status.json` 新增 `queuedAt`（仅审计）/ `startedRunningAt`；未来 run 的 `durationSec` 从 `startedRunningAt` 计算，排队时间不计入也不展示。
+  - 仍在排队的新 run `durationSec` 为空并显示 `—`；历史 run 无 `startedRunningAt` 时回退到原 `startedAt` 语义（不迁移）。
+  - runner 记录 `phaseSeconds`（segment/tracking/detect/cues/integrity/understanding），复核窗口展示阶段耗时。
+  - `media._frame_timestamp`：片尾缺失 PTS 的帧按“上一帧 + 一帧间隔”回退；真实 PTS 回退/解码错误在 `truncate_on_error=True` 时只处理最后可用前缀，run 置 `partial` 并记录 `processedDurationSec`/原因，UI 显示警告。
+  - 未做：ETA/排队位置、优先级、worker 分离、队列深度 API。
 
 ---
 

@@ -11,14 +11,23 @@ export type VlmProgress = {
   stage?: string; sampledFrames?: number; candidateCount?: number; trackingFraction?: number
   mediaTimeSec?: number; completedRequests?: number; totalRequests?: number; failedRequests?: number
   currentSegment?: number; segmentCount?: number; zoneCount?: number; integrityFraction?: number
+  truncated?: boolean; truncatedAtSec?: number | null; truncationReason?: string | null
+  truncationError?: string; timestampFallbackFrames?: number
 }
 export type VlmRun = {
   runId: string; videoId: string; fileName?: string; displayName?: string; state: string; error?: string
   progress?: VlmProgress
-  summary?: { resultCount: number; reason?: string; dryRun?: boolean; failedRequests?: number }
+  summary?: {
+    resultCount: number; reason?: string; dryRun?: boolean; failedRequests?: number
+    truncated?: boolean; truncatedAtSec?: number | null; truncationReason?: string | null
+    truncationError?: string; processedDurationSec?: number | null; sourceDurationSec?: number | null
+    timestampFallbackFrames?: number
+  }
   parameters?: VlmParameters
   videoDurationSec?: number | null
   durationSec?: number | null
+  phaseSeconds?: Record<string, number>
+  queuedAt?: number | null; startedRunningAt?: number | null
   startedAt?: number; finishedAt?: number; updatedAt?: number
 }
 /** A task row: a server run, or an upload that has not produced a run yet. */

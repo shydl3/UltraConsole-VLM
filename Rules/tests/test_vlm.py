@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 from ultra_rules.vlm.contracts import ConditionCheck, EventDefinition, RunRequest
-from ultra_rules.vlm.media import SampleSchedule, decoded, probe, sampled
+from ultra_rules.vlm.media import SampleSchedule, _frame_timestamp, decoded, probe, sampled
 from ultra_rules.vlm.poi import PoiTracker
 from ultra_rules.vlm.results import apply_answer, decision_from_conditions, parse_answer, verified_decision
 from ultra_rules.vlm.sampling import choose_rows, source_images, windows
@@ -108,6 +108,83 @@ def test_timestamps_sampling_and_exact_frame_retrieval(tmp_path, fps, vfr):
         assert np.array_equal(np.array(images[r["frameIndex"]]), all_frames[r["frameIndex"]][3].to_ndarray(format="rgb24"))
 
 
+def test_decoded_truncates_at_non_monotonic_timestamp(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from ultra_rules.vlm import media
+
+    class Frame:
+        def __init__(self, time):
+            self.time = time
+
+    class Stream:
+        thread_type = "AUTO"
+
+    class Container:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        @property
+        def streams(self):
+            return SimpleNamespace(video=[Stream()])
+
+        def decode(self, _stream):
+            yield Frame(2.0)
+            yield Frame(1.0)
+
+    monkeypatch.setattr(media.av, "open", lambda _path: Container())
+    meta = {"fps": 25, "timeOriginSec": 0, "durationSec": 10}
+    frames = list(decoded(tmp_path / "x.mp4", meta, truncate_on_error=True))
+    assert [timestamp for _, timestamp, _, _ in frames] == [2.0]
+    assert meta["truncated"] is True
+    assert meta["truncatedAtSec"] == 2.0
+    assert meta["truncationReason"] == "non_monotonic_timestamp"
+
+
+def test_decoded_truncates_at_decoder_error(monkeypatch, tmp_path):
+    from types import SimpleNamespace
+
+    from ultra_rules.vlm import media
+
+    class Frame:
+        time = 2.0
+
+    class Stream:
+        thread_type = "AUTO"
+
+    class Container:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        @property
+        def streams(self):
+            return SimpleNamespace(video=[Stream()])
+
+        def decode(self, _stream):
+            yield Frame()
+            raise RuntimeError("damaged tail")
+
+    monkeypatch.setattr(media.av, "open", lambda _path: Container())
+    meta = {"fps": 25, "timeOriginSec": 0, "durationSec": 10}
+    frames = list(decoded(tmp_path / "x.mp4", meta, truncate_on_error=True))
+    assert [timestamp for _, timestamp, _, _ in frames] == [2.0]
+    assert meta["truncated"] is True
+    assert meta["truncationReason"] == "decode_error"
+
+
+def test_missing_frame_timestamp_uses_last_plus_frame_period():
+    timestamp, source = _frame_timestamp(403_500, None, 25, 0, 16_139.803)
+    assert source == "frame_index"
+    assert timestamp == pytest.approx(16_139.843)
+    assert timestamp > 16_139.803
+
+
 def test_prepare_records_video_duration_for_review_before_preview(tmp_path):
     from ultra_rules.vlm.cli import prepare
 
@@ -118,6 +195,8 @@ def test_prepare_records_video_duration_for_review_before_preview(tmp_path):
     prepare(run_dir, req, source, {"fileName": "clip.mp4", "sha256": "x", "durationSec": 123.4}, tmp_path)
     status = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
     assert status["videoDurationSec"] == 123.4
+    assert status["queuedAt"] == status["startedAt"]
+    assert status["startedRunningAt"] is None
 
 
 def test_sample_schedule_matches_sampled_on_vfr(tmp_path):
