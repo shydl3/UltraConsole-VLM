@@ -1,5 +1,6 @@
 import { useEffect, useImperativeHandle, useRef, useState, type RefObject } from 'react'
 import { useT } from '../../i18n'
+import { formatDuration } from '../../utils/library'
 import { decisionKey, decisionTone, PRE_ROLL_OPTIONS, type ReviewMarker } from '../../utils/review'
 import { formatVideoTime } from '../../utils/videoAnalysis'
 import styles from './ReviewDialog.module.css'
@@ -117,8 +118,8 @@ export function ReviewVideo({ src, markers, preRoll, onPreRoll, follow, onFollow
           type="button"
           className={[styles.tick, styles[decisionTone(marker)]].join(' ')}
           style={{ left: `${Math.min(100, Math.max(0, (marker.triggerSec / duration) * 100))}%` }}
-          title={`${label} · ${marker.triggerSec.toFixed(2)}s · ${t(decisionKey(marker))}`}
-          aria-label={`${t('review.jump')} ${label} ${marker.triggerSec.toFixed(2)}s`}
+          title={`${label} · ${formatDuration(marker.triggerSec, t)} · ${t(decisionKey(marker))}`}
+          aria-label={`${t('review.jump')} ${label} ${formatDuration(marker.triggerSec, t)}`}
           onClick={() => onJump(marker)}
         />
       })}

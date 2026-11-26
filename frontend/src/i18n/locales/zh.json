@@ -145,6 +145,7 @@
     "dryRun": "仅抽帧预览，不调用 Qwen",
     "uploading": "提交中…",
     "start": "开始语义分析",
+    "alreadyQueued": "该视频已在队列中",
     "chooseVideo": "请先选择视频并绘制 POI",
     "history": "已完成记录",
     "cancel": "取消任务",

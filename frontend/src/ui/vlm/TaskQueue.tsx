@@ -10,12 +10,13 @@ import styles from './TaskQueue.module.css'
  * Server-driven task queue: polls run state so a page reload re-attaches to
  * queued/running analyses, and merges the uploads still in flight in this tab.
  */
-export function TaskQueue({ submissions, version, selectedRunId, onBusyChange, onRunUpdate }: {
+export function TaskQueue({ submissions, version, selectedRunId, onBusyChange, onRunUpdate, onActiveChange }: {
   submissions: VlmTask[]
   version: number
   selectedRunId: string
   onBusyChange: (busy: boolean) => void
   onRunUpdate?: (run: VlmRun) => void
+  onActiveChange?: (videoIds: Set<string>) => void
 }) {
   const t = useT()
   const [runs, setRuns] = useState<VlmRun[]>([])
@@ -25,8 +26,10 @@ export function TaskQueue({ submissions, version, selectedRunId, onBusyChange, o
   const [tick, setTick] = useState(0)
   const selectedRef = useRef(selectedRunId)
   const onRunUpdateRef = useRef(onRunUpdate)
+  const onActiveChangeRef = useRef(onActiveChange)
   useEffect(() => { selectedRef.current = selectedRunId }, [selectedRunId])
   useEffect(() => { onRunUpdateRef.current = onRunUpdate }, [onRunUpdate])
+  useEffect(() => { onActiveChangeRef.current = onActiveChange }, [onActiveChange])
 
   useEffect(() => {
     let alive = true
@@ -44,6 +47,7 @@ export function TaskQueue({ submissions, version, selectedRunId, onBusyChange, o
         const activeIds = new Set(running.map(run => run.runId))
         const list = [...running, ...recent.filter(run => !activeIds.has(run.runId))]
         setRuns(list)
+        onActiveChangeRef.current?.(new Set(running.map(run => run.videoId)))
         setError('')
         active = running.length > 0
         const selected = list.find(run => run.runId === selectedRef.current)

@@ -145,6 +145,7 @@
     "dryRun": "Preview samples only; skip Qwen",
     "uploading": "Submitting…",
     "start": "Analyze events",
+    "alreadyQueued": "This video is already queued",
     "chooseVideo": "Select a video and draw a POI first",
     "history": "Completed runs",
     "cancel": "Cancel task",

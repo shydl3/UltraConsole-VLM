@@ -1,6 +1,7 @@
 import { memo, useEffect, useState } from 'react'
 import { apiVlmMedia } from '../../api/client'
 import { useT } from '../../i18n'
+import { formatDuration } from '../../utils/library'
 import { decisionKey, decisionTone, isFlagged } from '../../utils/review'
 import type { VlmCondition, VlmResult } from '../../utils/vlm'
 import { ModelExplanation } from '../vlm/ModelExplanation'
@@ -33,7 +34,7 @@ function ConditionList({ conditions, criteria, onSeek }: {
     <ul>{conditions.map(condition => <li key={condition.index}>
       {criteria?.[condition.index] ?? `#${condition.index}`} · {label(condition.value)}
       {condition.evidenceTimeSec != null && <button type="button" onClick={() => onSeek(condition.evidenceTimeSec as number)}>
-        {t('vlm.evidenceAt')} {condition.evidenceTimeSec.toFixed(2)}s
+        {t('vlm.evidenceAt')} {formatDuration(condition.evidenceTimeSec, t)}
       </button>}
     </li>)}</ul>
   </div>
@@ -56,8 +57,8 @@ export const ResultCard = memo(function ResultCard({ result, runId, ruleName, ex
     <div className={styles.cardHead}>
       <button type="button" className={styles.cardTitle} aria-expanded={expanded} onClick={() => onToggle(result.resultId)}>
         {cue
-          ? `${cue.cueLabel ?? cue.triggerCueId ?? result.cueId ?? 'C'} · ${result.triggerSec.toFixed(2)}s · ${cue.poiLabel ?? result.poiId}`
-          : integrity ? `${integrity.label} · ${result.triggerSec.toFixed(2)}s` : `#${result.trackId} · ${result.triggerSec.toFixed(2)}s · ${result.poiId}`}
+          ? `${cue.cueLabel ?? cue.triggerCueId ?? result.cueId ?? 'C'} · ${formatDuration(result.triggerSec, t)} · ${cue.poiLabel ?? result.poiId}`
+          : integrity ? `${integrity.label} · ${formatDuration(result.triggerSec, t)}` : `#${result.trackId} · ${formatDuration(result.triggerSec, t)} · ${result.poiId}`}
       </button>
       <span className={[styles.badge, styles[decisionTone(result)]].join(' ')}>{t(decisionKey(result))}</span>
     </div>
@@ -71,29 +72,29 @@ export const ResultCard = memo(function ResultCard({ result, runId, ruleName, ex
     {expanded && <>
       {result.deterministicDecision && <div className={styles.section}>
         {t('vlm.deterministic')}: {t(`vlm.${result.deterministicDecision}`)}
-        {result.cueEvidence ? ` · ${t('vlm.cueState')}=${result.cueEvidence.state}${result.cueEvidence.onsetSec != null ? ` @${result.cueEvidence.onsetSec.toFixed(2)}s` : ''}` : ''}
+        {result.cueEvidence ? ` · ${t('vlm.cueState')}=${result.cueEvidence.state}${result.cueEvidence.onsetSec != null ? ` @${formatDuration(result.cueEvidence.onsetSec, t)}` : ''}` : ''}
       </div>}
       {cue && <div className={styles.section}>
         <strong>{t('vlm.cueTrigger')}</strong>
-        <span>{cue.cueLabel ?? cue.triggerCueId} (#{cue.pairIndex ?? '?'}) · {t('vlm.cueInterval')} {cue.interval ? `${cue.interval[0].toFixed(2)}–${cue.interval[1].toFixed(2)}s` : '—'}</span>
+        <span>{cue.cueLabel ?? cue.triggerCueId} (#{cue.pairIndex ?? '?'}) · {t('vlm.cueInterval')} {cue.interval ? `${formatDuration(cue.interval[0], t)}–${formatDuration(cue.interval[1], t)}` : '—'}</span>
         {(cue.rawTriggerCount ?? 1) > 1 && <span> · {t('vlm.cueRawTriggers')} {cue.rawTriggerCount}</span>}
         <span> · {t('vlm.pairedPoi')}: {cue.poiLabel ?? cue.poiId} ({cue.poiKind ?? 'line'})</span>
         <span> · {cue.retreated
-          ? `${t('vlm.retreated')}${cue.retreatSec != null ? ` @${cue.retreatSec.toFixed(2)}s` : ''}`
+          ? `${t('vlm.retreated')}${cue.retreatSec != null ? ` @${formatDuration(cue.retreatSec, t)}` : ''}`
           : t('vlm.notRetreated')}</span>
-        {cue.entrySec != null && <span> · {t('vlm.entryAt')} {cue.entrySec.toFixed(2)}s</span>}
+        {cue.entrySec != null && <span> · {t('vlm.entryAt')} {formatDuration(cue.entrySec, t)}</span>}
       </div>}
       {integrity && <div className={styles.section}>
         <strong>{t('vlm.integrityEvidence')}</strong>
         {integrity.changed === false ? <span>
           {t('vlm.integrityNegative')}
           {integrity.sampleCount != null ? ` · ${t('vlm.integritySamples', { count: integrity.sampleCount })}` : ''}
-          {integrity.baselineSec != null ? ` · ${t('vlm.integrityMonitorFrom')} ${integrity.baselineSec.toFixed(1)}s` : ''}
+          {integrity.baselineSec != null ? ` · ${t('vlm.integrityMonitorFrom')} ${formatDuration(integrity.baselineSec, t)}` : ''}
         </span> : <>
           <span>
-            {t('vlm.integrityOnset')} {integrity.onsetSec?.toFixed(2) ?? '—'}s · {t('vlm.integrityPeak')} {(integrity.peakRatio * 100).toFixed(1)}%
+            {t('vlm.integrityOnset')} {integrity.onsetSec != null ? formatDuration(integrity.onsetSec, t) : '—'} · {t('vlm.integrityPeak')} {(integrity.peakRatio * 100).toFixed(1)}%
             {integrity.offsetSec != null && integrity.onsetSec != null
-              ? ` · ${t('vlm.integrityDuration')} ${(integrity.offsetSec - integrity.onsetSec).toFixed(1)}s`
+              ? ` · ${t('vlm.integrityDuration')} ${formatDuration(integrity.offsetSec - integrity.onsetSec, t)}`
               : ` · ${t('vlm.integrityToEndTime')}`}
           </span>
           <div className={styles.integrityGrid}>
@@ -122,7 +123,7 @@ export const ResultCard = memo(function ResultCard({ result, runId, ruleName, ex
       {result.downgradeReasons?.length ? <div className={styles.section}>{t('vlm.review')}: {result.downgradeReasons.join(', ')}</div> : null}
       {result.error && <div className={styles.error}>{result.error}</div>}
       {(result.segments || []).map((segment, index) => <div key={index} className={styles.section}>
-        <p className={styles.muted}>{segment.window.startSec.toFixed(2)}–{segment.window.endSec.toFixed(2)}s</p>
+        <p className={styles.muted}>{formatDuration(segment.window.startSec, t)}–{formatDuration(segment.window.endSec, t)}</p>
         <ModelExplanation videoDescription={segment.videoDescription} reason={segment.reason} />
         <ConditionList conditions={segment.conditions} criteria={result.eventCriteria} onSeek={onSeek} />
         {segment.previewPath && !integrity && <EvidenceImage runId={runId} path={segment.previewPath} />}

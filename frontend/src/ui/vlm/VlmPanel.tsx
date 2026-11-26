@@ -36,14 +36,28 @@ export function VlmPanel({ video, eventsConfig, basicRunning, onBusyChange, onSe
   const [run, setRun] = useState<VlmRun | null>(null)
   const [error, setError] = useState('')
   const [submitting, setSubmitting] = useState(false)
+  const [submitLock, setSubmitLock] = useState(false)
+  const [activeVideoIds, setActiveVideoIds] = useState<Set<string>>(new Set())
   const [parameters, setParameters] = useState<VlmParameters | null>(null)
   const submittingRef = useRef(false)
+  const submitLockRef = useRef(false)
+  const submitLockTimer = useRef<number | undefined>(undefined)
+  const activeVideoIdsRef = useRef<Set<string>>(new Set())
   const queueBusyRef = useRef(false)
   const runIdRef = useRef('')
   const isBusy = submitting || queueBusy
 
   useEffect(() => { submittingRef.current = submitting }, [submitting])
   useEffect(() => { runIdRef.current = runId }, [runId])
+  useEffect(() => () => window.clearTimeout(submitLockTimer.current), [])
+
+  const handleActiveChange = useCallback((ids: Set<string>) => {
+    activeVideoIdsRef.current = ids
+    setActiveVideoIds(previous => {
+      if (previous.size === ids.size && [...ids].every(id => previous.has(id))) return previous
+      return ids
+    })
+  }, [])
 
   const files = useMemo(() => {
     const list = video ? [video] : []
@@ -119,10 +133,23 @@ export function VlmPanel({ video, eventsConfig, basicRunning, onBusyChange, onSe
   }
 
   async function start() {
-    if (!files.length || !parameters) return
+    // State updates are asynchronous: a rapid double click can enter this
+    // function twice before the button re-renders as disabled. Keep a
+    // synchronous lock plus a short settle window for the queue poll.
+    if (!files.length || !parameters || submittingRef.current || submitLockRef.current) return
+    // The same video may already be queued/running, e.g. the first POST has
+    // returned but the queue poll has not refreshed the UI yet.
+    if (files.some(file => activeVideoIdsRef.current.has(file.videoId))) return
     setError('')
-    setSubmitting(true)
+    submitLockRef.current = true
+    setSubmitLock(true)
+    window.clearTimeout(submitLockTimer.current)
+    submitLockTimer.current = window.setTimeout(() => {
+      submitLockRef.current = false
+      setSubmitLock(false)
+    }, 2500)
     submittingRef.current = true
+    setSubmitting(true)
     onBusyChange(true)
     try {
       if (!rulesRef.current) throw new Error(t('eventRules.loading'))
@@ -158,6 +185,7 @@ export function VlmPanel({ video, eventsConfig, basicRunning, onBusyChange, onSe
   const pois = vlmPois(eventsConfig)
   const cues = vlmCues(eventsConfig).map(c => ({ id: c.id, label: c.label, kind: 'cue', pairIndex: c.pairIndex }))
   const integrity = vlmIntegrity(eventsConfig).map(z => ({ id: z.id, label: z.label, kind: 'integrity' }))
+  const duplicateSubmission = files.some(file => activeVideoIds.has(file.videoId))
   return <section className={styles.panel} aria-label={t('vlm.title')}>
     <strong>{t('vlm.title')}</strong>
     <div className={styles.hint}>{t('vlm.hint')}</div>
@@ -187,14 +215,15 @@ export function VlmPanel({ video, eventsConfig, basicRunning, onBusyChange, onSe
       </ul>
     </div>
     <div className={styles.toolbar}>
-      <button disabled={!files.length || !parameters || (!pois.length && !integrity.length) || basicRunning || submitting || rulesState.busy || !rulesState.ready} onClick={() => void start()}>
+      <button disabled={!files.length || !parameters || (!pois.length && !integrity.length) || basicRunning || submitting || submitLock || duplicateSubmission || rulesState.busy || !rulesState.ready} onClick={() => void start()}>
         {submitting ? t('vlm.uploading') : files.length > 1 ? t('vlm.batchStart', { count: files.length })
           : rulesState.dirty ? t('eventRules.saveAndStart') : t('vlm.start')}
       </button>
+      {duplicateSubmission && <span className={styles.hint}>{t('vlm.alreadyQueued')}</span>}
       <span className={styles.hint}>{pois.length} POI{integrity.length ? ` · ${t('vlm.integrityCount', { count: integrity.length })}` : ''} · {files.length ? files[0].name : t('vlm.chooseVideo')}</span>
     </div>
     <TaskQueue submissions={submissions} version={queueVersion} selectedRunId={runId}
-      onBusyChange={handleBusy} onRunUpdate={handleRunUpdate} />
+      onBusyChange={handleBusy} onRunUpdate={handleRunUpdate} onActiveChange={handleActiveChange} />
     <div className={styles.toolbar}>
       <label>{t('vlm.history')} <select value={runId} onChange={e => {
         setRunId(e.target.value); setSnapshot(null); setRun(null); setError('')
