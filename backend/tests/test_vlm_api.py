@@ -506,3 +506,11 @@ def test_artifact_endpoint_renders_missing_preview_on_demand(client, tmp_path):
     assert (run / "previews" / "s0.jpg").is_file()
     # Missing manifests stay 404 instead of triggering a render or crashing.
     assert client.get("/api/vlm/runs/lazy-run/artifacts/previews/missing.jpg").status_code == 404
+
+
+def test_status_backfills_video_duration_from_request(tmp_path):
+    run = tmp_path / "run"
+    run.mkdir()
+    write_json(run / "status.json", {"runId": "run", "state": "completed", "startedAt": 100, "finishedAt": 110})
+    write_json(run / "request.json", {"video": {"durationSec": 123.4}})
+    assert jobs.status(run)["videoDurationSec"] == 123.4

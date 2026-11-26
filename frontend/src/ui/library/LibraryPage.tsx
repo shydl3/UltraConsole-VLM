@@ -125,7 +125,10 @@ export function LibraryPage() {
               <td><button className={styles.name} onClick={() => openItem(item)}>{item.name}</button><span className={styles.subline}>{t(`library.${item.kind}`)}</span></td>
               <td><span className={item.active ? styles.running : styles.badge}>{['ready', 'running', 'unknown'].includes(item.state) ? t(`library.${item.state}`) : t(`vlm.${item.state}`)}</span></td>
               <td className={styles.date}>{new Date(item.createdAt * 1000).toLocaleString()}</td>
-              <td className={styles.date}>{formatDuration(item.durationSec, t)}{item.active && item.durationSec != null ? ` · ${t('library.inProgress')}` : ''}</td>
+              <td className={styles.date}>
+                <div>{formatDuration(item.durationSec, t)}{item.active && item.durationSec != null ? ` · ${t('library.inProgress')}` : ''}</div>
+                {item.videoDurationSec != null && <div className={styles.subline}>{t('library.videoDuration')} {formatDuration(item.videoDurationSec, t)}</div>}
+              </td>
               <td>{item.kind === 'video' ? formatBytes(item.sizeBytes) : item.resultCount == null ? '—' : t('library.resultCount', { count: item.resultCount })}</td>
               <td><div className={styles.rowActions}>
                 <button onClick={() => openItem(item)}>{t('library.open')}</button>

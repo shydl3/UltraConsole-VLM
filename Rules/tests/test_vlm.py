@@ -108,6 +108,18 @@ def test_timestamps_sampling_and_exact_frame_retrieval(tmp_path, fps, vfr):
         assert np.array_equal(np.array(images[r["frameIndex"]]), all_frames[r["frameIndex"]][3].to_ndarray(format="rgb24"))
 
 
+def test_prepare_records_video_duration_for_review_before_preview(tmp_path):
+    from ultra_rules.vlm.cli import prepare
+
+    source = tmp_path / "clip.mp4"
+    source.write_bytes(b"video")
+    run_dir = tmp_path / "run"
+    req = request(dryRun=True, modelPath=str(tmp_path / "model"))
+    prepare(run_dir, req, source, {"fileName": "clip.mp4", "sha256": "x", "durationSec": 123.4}, tmp_path)
+    status = json.loads((run_dir / "status.json").read_text(encoding="utf-8"))
+    assert status["videoDurationSec"] == 123.4
+
+
 def test_sample_schedule_matches_sampled_on_vfr(tmp_path):
     path = tmp_path / "clip.mp4"
     make_video(path, 25, vfr=True)

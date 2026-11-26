@@ -96,12 +96,13 @@ def _entry(kind: Kind, path: Path):
     meta = _read(_metadata(kind, path))
     identifier = path.stem if kind == "video" else path.name
     original = identifier
-    state, count, size, active, duration_sec = "ready", None, None, False, None
+    state, count, size, active, duration_sec, video_duration_sec = "ready", None, None, False, None, None
     date = path.stat().st_mtime
     if kind == "video":
         original = meta.get("originalFilename") or path.name
         size = path.stat().st_size
         date = _timestamp(meta.get("createdAt", meta.get("importedAt")), date)
+        video_duration_sec = meta.get("durationSec")
     elif kind == "vlm":
         status = vlm_jobs.status(path)
         original = status.get("fileName") or identifier
@@ -109,6 +110,7 @@ def _entry(kind: Kind, path: Path):
         active = state not in vlm_jobs.TERMINAL
         count = status.get("summary", {}).get("resultCount")
         date = _timestamp(status.get("startedAt"), date)
+        video_duration_sec = status.get("videoDurationSec")
         started = status.get("startedAt")
         if started is not None:
             start_ts = _timestamp(started, None)
@@ -118,7 +120,8 @@ def _entry(kind: Kind, path: Path):
                 duration_sec = max(0.0, end_ts - start_ts)
     return {"kind": kind, "id": identifier, "name": meta.get("displayName") or original,
             "originalName": original, "state": state, "createdAt": date,
-            "sizeBytes": size, "resultCount": count, "active": active, "durationSec": duration_sec}
+            "sizeBytes": size, "resultCount": count, "active": active,
+            "durationSec": duration_sec, "videoDurationSec": video_duration_sec}
 
 
 @router.get("")

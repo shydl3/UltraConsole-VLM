@@ -116,6 +116,8 @@ def _pump():
                     error = f"Worker launch failed: {exc}"
             write_json(folder / "status.json", {"runId": folder.name,
                                                 "videoId": config.get("request", {}).get("videoId"),
+                                                "fileName": config.get("video", {}).get("fileName"),
+                                                "videoDurationSec": config.get("video", {}).get("durationSec"),
                                                 "state": "failed", "error": error,
                                                 "finishedAt": time.time(), "updatedAt": time.time()})
 

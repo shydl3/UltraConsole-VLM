@@ -45,6 +45,15 @@ def owner_alive(run_dir: Path) -> bool:
 
 def status(run_dir: Path):
     result = read_json(run_dir / "status.json")
+    # Historical runs predate videoDurationSec; request.json carries the probed
+    # video metadata from prepare(), so backfill without touching status.json.
+    if result.get("videoDurationSec") is None:
+        request_path = run_dir / "request.json"
+        if request_path.exists():
+            try:
+                result["videoDurationSec"] = read_json(request_path).get("video", {}).get("durationSec")
+            except (OSError, ValueError):
+                pass
     owner_path = run_dir / "owner.json"
     owner = read_json(owner_path) if owner_path.exists() else None
     alive = owner_alive(run_dir)

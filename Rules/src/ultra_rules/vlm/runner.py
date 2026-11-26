@@ -108,8 +108,10 @@ def run(run_dir: Path):
 
     def status(state, **extra):
         write_json(run_dir / "status.json", {"runId": run_dir.name, "videoId": config["request"]["videoId"],
-                                            "fileName": config["video"]["fileName"], "state": state,
-                                            "startedAt": started, "updatedAt": time.time(), **extra})
+                                            "fileName": config["video"]["fileName"],
+                                            "videoDurationSec": config["video"].get("durationSec"),
+                                            "state": state, "startedAt": started,
+                                            "updatedAt": time.time(), **extra})
 
     write_json(run_dir / "owner.json", {"pid": os.getpid(), "identity": process_identity(os.getpid())})
     with lock_path.open("w") as lock:

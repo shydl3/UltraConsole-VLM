@@ -6,6 +6,7 @@ export type LibraryItem = {
   kind: LibraryKind; id: string; name: string; originalName: string; state: string
   createdAt: number; sizeBytes: number | null; resultCount: number | null; active: boolean
   durationSec: number | null
+  videoDurationSec?: number | null
 }
 export type LibraryList = {
   items: LibraryItem[]; total: number; counts: Record<LibraryKind, number>; videoDirectory: string

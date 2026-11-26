@@ -35,9 +35,11 @@ export function ReviewDialog({ target, onClose, standalone = false }: {
   const [followId, setFollowId] = useState('')
   const data = useReviewData(target, filter, offset, pageSize)
   const isRun = target.kind === 'vlm'
-  // Computed server-side from startedAt/finishedAt (same clock as the library list);
-  // live runs advance on the 2.5s poll.
+  // Processing time is computed server-side from startedAt/finishedAt; video
+  // duration is recorded when the run is created, so it is available before a
+  // preview exists.
   const duration = data.run?.durationSec ?? null
+  const videoDuration = data.run?.videoDurationSec ?? null
 
   useEffect(() => {
     // Inside the detached window the dialog is the page itself: non-modal, filling
@@ -152,6 +154,7 @@ export function ReviewDialog({ target, onClose, standalone = false }: {
         <div className={styles.headingRow}>
           <h2 ref={headingRef} id="review-title" tabIndex={-1}>{data.name || t('review.title')}</h2>
           {data.run && <span className={styles.stateChip}>{t(`vlm.${data.run.state}`)}</span>}
+          {isRun && videoDuration != null && <span className={styles.duration}>{t('review.videoDuration')} {formatDuration(videoDuration, t)}</span>}
           {isRun && duration != null && <span className={styles.duration}>{t('review.duration')} {formatDuration(duration, t)}</span>}
           <span className={styles.muted}>{target.kind === 'vlm' ? t('library.vlm') : t('library.video')}</span>
         </div>
@@ -166,6 +169,7 @@ export function ReviewDialog({ target, onClose, standalone = false }: {
           <ReviewVideo
             src={data.videoUrl}
             videoRef={videoRef}
+            durationHint={videoDuration}
             markers={isRun ? data.markers : []}
             preRoll={preRoll}
             onPreRoll={setPreRoll}

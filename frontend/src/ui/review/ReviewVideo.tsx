@@ -30,7 +30,7 @@ function Timecode({ target, duration }: { target: RefObject<HTMLVideoElement | n
   return <span className={styles.clock}>{formatVideoTime(time)} / {formatVideoTime(duration)}</span>
 }
 
-export function ReviewVideo({ src, markers, preRoll, onPreRoll, follow, onFollow, onJump, onStep, transport, videoRef }: {
+export function ReviewVideo({ src, markers, preRoll, onPreRoll, follow, onFollow, onJump, onStep, transport, videoRef, durationHint }: {
   src: string
   markers: ReviewMarker[]
   preRoll: number
@@ -41,10 +41,12 @@ export function ReviewVideo({ src, markers, preRoll, onPreRoll, follow, onFollow
   onStep: (delta: -1 | 1) => void
   transport: boolean
   videoRef: RefObject<ReviewVideoHandle | null>
+  durationHint?: number | null
 }) {
   const t = useT()
   const element = useRef<HTMLVideoElement | null>(null)
-  const [duration, setDuration] = useState(0)
+  const [loadedDuration, setLoadedDuration] = useState(0)
+  const duration = loadedDuration || durationHint || 0
   const lastTime = useRef(0)
   const lastSrc = useRef(src)
 
@@ -91,7 +93,7 @@ export function ReviewVideo({ src, markers, preRoll, onPreRoll, follow, onFollow
       controls
       playsInline
       preload="metadata"
-      onLoadedMetadata={event => setDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
+      onLoadedMetadata={event => setLoadedDuration(Number.isFinite(event.currentTarget.duration) ? event.currentTarget.duration : 0)}
     /> : <p className={styles.empty}>{t('review.loading')}</p>}
     {transport && <div className={styles.transport}>
       <label className={styles.small}>{t('review.preRoll')}

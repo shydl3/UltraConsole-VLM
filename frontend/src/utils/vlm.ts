@@ -17,6 +17,7 @@ export type VlmRun = {
   progress?: VlmProgress
   summary?: { resultCount: number; reason?: string; dryRun?: boolean; failedRequests?: number }
   parameters?: VlmParameters
+  videoDurationSec?: number | null
   durationSec?: number | null
   startedAt?: number; finishedAt?: number; updatedAt?: number
 }

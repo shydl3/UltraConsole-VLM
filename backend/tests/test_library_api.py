@@ -28,7 +28,7 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(security, "settings", replace(security.settings, api_token="secret"))
     write(vlm.DATA_ROOT / "runs/analysis/status.json", {
         "runId": "analysis", "state": "completed", "videoId": "source1", "fileName": "监控.mp4",
-        "startedAt": 200, "summary": {"resultCount": 1},
+        "startedAt": 200, "videoDurationSec": 7300, "summary": {"resultCount": 1},
     })
     (vlm.DATA_ROOT / "runs/analysis/results.jsonl").write_text(json.dumps({"trackId": 7, "reason": "result",
                                                                         "videoDescription": "目标走向画面右侧，门框被遮挡。"}) + '\n')
@@ -46,6 +46,7 @@ def test_all_categories_pagination_search_and_details(client):
     assert result['total'] == 2
     assert result['counts'] == {'vlm': 1, 'video': 1}
     assert [item['kind'] for item in result['items']] == ['video', 'vlm']
+    assert next(item for item in result['items'] if item['kind'] == 'vlm')['videoDurationSec'] == 7300
     assert client.get('/api/library?offset=1&limit=1').json()['items'][0]['kind'] == 'vlm'
     assert client.get('/api/library', params={'q': '监控'}).json()['total'] == 1
     assert client.get('/api/library?kind=video').json()['total'] == 1
