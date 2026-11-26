@@ -1,7 +1,7 @@
 # UltraConsole-VLM 处理流水线优化指导书
 
 > 版本：v1.1（2026-11-26）
-> 定位：给后续 agent 的主施工指导书。本文维护性能路线 P0–P6 的现状、红线、优化路线与验收标准；`dev-guide.md` 保留长期架构/设计说明，关键性能节点同步到其 6.4.7。
+> 定位：给后续 agent 的主施工指导书。本文维护性能路线 P0–P6 的现状、红线、优化路线与验收标准；`dev-guide.md` 只保留架构、设计契约、代码地图与开发约定，性能细节以本文为准。
 > 范围：`Rules/src/ultra_rules/vlm`、`backend/app`、`frontend` 中与 VLM 分析流水线相关的部分。
 
 ---
@@ -14,7 +14,7 @@
 - **性能 P3 🔶**：tracking I/O/缓存优化完成（batch insert、no-fsync 临时库、延迟索引、gzip level1）；tracking 100.8s → 89.3s（-11.4%），完整 detect 193.6s → 179.7s（-7.2%），9038 帧零漂移。TensorRT/ONNX/FP16/NVDEC 待独立评测。
 - **下一步**：P4（队列、ETA、worker 分离）或 P3 剩余模型/解码评测。P5/P6 仍待做。
 - **验证基线**：Python **223 passed / 1 skipped**；ruff 全绿；前端 46 用例、eslint、build 通过。
-- **注意**：`optimize.md` 的 P0–P6 是性能编号，与 `dev-guide.md` 第 1 节的准确率 P0/P1/P2 无关。
+- **注意**：`optimize.md` 的 P0–P6 是性能编号，与 `dev-guide.md` 第 3 节的准确率 P0/P1/P2 无关。
 
 ---
 
@@ -385,7 +385,7 @@ PYTHONPATH=Rules/src /home/raider/miniconda3/envs/ultraconsole/bin/python -c \
 
 ## 9. Agent 工作规则
 
-1. **先读后改**：读相关代码、测试、`dev-guide.md` 的 3.4/4.8/6.4，确认红线。
+1. **先读后改**：读相关代码、测试，以及 `dev-guide.md` 第 2 节（设计契约/红线）与代码地图。
 2. **一次一个 P 项**：不要在一次提交里同时改解码、调度和前端。
 3. **先测基线**：改动前用同一段视频记录当前耗时与结果；改动后用相同输入复算。
 4. **语义等价优先**：性能改动必须证明判定结果不变；不能证明时，先加开关并默认关闭。
@@ -471,4 +471,4 @@ PYTHONPATH=Rules/src /home/raider/miniconda3/envs/ultraconsole/bin/python -c \
 - 不把 forced_passage 改成 VLM 默认复核；
 - 不改变 3 秒 episode 去重、通道配对、5 秒退回窗口；
 - 不为了提速降低视频分辨率/poseFps 而不做评测；
-- 不在本轮修改 `dev-guide.md`。
+- 不在本文重复 `dev-guide.md` 的架构、代码地图与用户操作说明；性能细节以本文为准。

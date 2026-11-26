@@ -125,7 +125,7 @@ elif conda_py="$(conda_env_python)"; then
 elif command -v python3 >/dev/null 2>&1; then
   PYTHON_BIN="$(command -v python3)"
 else
-  echo "错误：未找到 Python 3。请先按 README 创建后端虚拟环境。" >&2
+  echo "错误：未找到 Python 3。请先按 deploy.md 创建后端虚拟环境。" >&2
   exit 1
 fi
 
