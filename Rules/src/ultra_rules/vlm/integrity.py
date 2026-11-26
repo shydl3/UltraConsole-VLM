@@ -385,55 +385,79 @@ def _open_db(observations: Path | None, zone: IntegrityZone):
     return sqlite3.connect(observations)
 
 
-def detect_timeline(source: Path, meta: dict, zone: IntegrityZone,
-                    observations: Path | None = None, evidence_dir: Path | None = None) -> dict:
-    db = _open_db(observations, zone)
-    ctx: _Context | None = None
-    baseline_crops: list[np.ndarray] = []
-    baseline_sec = 0.0
-    sample_count = unreliable = 0
-    if evidence_dir is not None:
-        evidence_dir.mkdir(parents=True, exist_ok=True)
+class _ZoneRuntime:
+    """Streaming integrity detector fed by a shared decode pass."""
 
-    def on_confirm(index: int, payload):
-        if evidence_dir is None or payload is None:
+    def __init__(self, source: Path, zone: IntegrityZone, meta: dict,
+                 observations: Path | None = None, evidence_dir: Path | None = None):
+        self.source = source
+        self.zone = zone
+        self.meta = meta
+        self.db = _open_db(observations, zone)
+        self.evidence_dir = evidence_dir
+        self.ctx: _Context | None = None
+        self.baseline_crops: list[np.ndarray] = []
+        self.baseline_sec = 0.0
+        self.sample_count = 0
+        self.unreliable = 0
+        if evidence_dir is not None:
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+        self.fold = _Persistence(zone, self._on_confirm, lambda interval: None)
+
+    def _on_confirm(self, index: int, payload):
+        if self.evidence_dir is None or payload is None:
             return {}
         crop, diff, full_bgr = payload
-        return _write_evidence(evidence_dir, ctx, index, crop, diff, full_bgr)
+        return _write_evidence(self.evidence_dir, self.ctx, index, crop, diff, full_bgr)
 
-    fold = _Persistence(zone, on_confirm, lambda interval: None)
+    def feed(self, t: float, bgr: np.ndarray, persons: list[dict] | None = None):
+        self.sample_count += 1
+        if self.ctx is None:
+            self.ctx = _Context(self.zone, self.meta, bgr)
+        if len(self.baseline_crops) < self.zone.baselineFrames:
+            small = _small_gray(bgr)
+            shift = _phase_shift(self.ctx.ref_small, small)
+            if shift is not None:
+                dy, dx = shift
+                if dy or dx:
+                    bgr = np.roll(bgr, (-round(dy * self.ctx.height / small.shape[0]),
+                                        -round(dx * self.ctx.width / small.shape[1])), axis=(0, 1))
+                self.baseline_crops.append(_gray(self.ctx.crop(bgr)))
+                self.baseline_sec = t
+            if len(self.baseline_crops) < self.zone.baselineFrames:
+                return
+            self.ctx.set_baseline(self.baseline_crops)
+        if persons is None:
+            persons = _persons_near(self.db, t)
+        changed, ratio, crop, diff, aligned = self.ctx.evaluate(bgr, persons)
+        if changed is None:
+            self.unreliable += 1
+        self.fold.push(t, changed, ratio, (crop, diff, aligned) if changed else None)
+
+    def finish(self) -> dict:
+        self.fold.finish()
+        for interval in self.fold.intervals:
+            _refine_onset(self.source, self.meta, self.ctx, self.db, interval)
+            interval.pop("prevCleanSec", None)
+        return {"intervals": self.fold.intervals, "sampleCount": self.sample_count,
+                "unreliableCount": self.unreliable, "baselineSec": round(self.baseline_sec, 3),
+                "roiPixelCount": self.ctx.roi_pixels if self.ctx else 0}
+
+    def close(self):
+        if self.db is not None:
+            self.db.close()
+            self.db = None
+
+
+def detect_timeline(source: Path, meta: dict, zone: IntegrityZone,
+                    observations: Path | None = None, evidence_dir: Path | None = None) -> dict:
+    runtime = _ZoneRuntime(source, zone, meta, observations, evidence_dir)
     try:
         for _index, t, _source, frame in sampled(source, meta, zone.sampleFps):
-            bgr = frame.to_ndarray(format="bgr24")
-            sample_count += 1
-            if ctx is None:
-                ctx = _Context(zone, meta, bgr)
-            if len(baseline_crops) < zone.baselineFrames:
-                small = _small_gray(bgr)
-                shift = _phase_shift(ctx.ref_small, small)
-                if shift is not None:
-                    dy, dx = shift
-                    if dy or dx:
-                        bgr = np.roll(bgr, (-round(dy * ctx.height / small.shape[0]),
-                                            -round(dx * ctx.width / small.shape[1])), axis=(0, 1))
-                    baseline_crops.append(_gray(ctx.crop(bgr)))
-                    baseline_sec = t
-                if len(baseline_crops) < zone.baselineFrames:
-                    continue
-                ctx.set_baseline(baseline_crops)
-            changed, ratio, crop, diff, aligned = ctx.evaluate(bgr, _persons_near(db, t))
-            if changed is None:
-                unreliable += 1
-            fold.push(t, changed, ratio, (crop, diff, aligned) if changed else None)
-        fold.finish()
-        for interval in fold.intervals:
-            _refine_onset(source, meta, ctx, db, interval)
-            interval.pop("prevCleanSec", None)
+            runtime.feed(t, frame.to_ndarray(format="bgr24"))
+        return runtime.finish()
     finally:
-        if db is not None:
-            db.close()
-    return {"intervals": fold.intervals, "sampleCount": sample_count, "unreliableCount": unreliable,
-            "baselineSec": round(baseline_sec, 3), "roiPixelCount": ctx.roi_pixels if ctx else 0}
+        runtime.close()
 
 
 def calibrate(source: Path, meta: dict, zone: IntegrityZone, max_samples: int = 600) -> dict:
@@ -465,6 +489,13 @@ def calibrate(source: Path, meta: dict, zone: IntegrityZone, max_samples: int = 
             "samples": samples}
 
 
+def cache_key(meta: dict, zones: list[IntegrityZone], obs_fingerprint: dict | None) -> str:
+    """Stable cache key shared by the integrity-only and combined detect phases."""
+    return digest({"version": INTEGRITY_VERSION, "source": meta["sha256"],
+                   "zones": [zone.model_dump() for zone in zones],
+                   "observations": obs_fingerprint})
+
+
 def detect_run(run_dir: Path) -> None:
     config = read_json(run_dir / "request.json")
     request = RunRequest.model_validate(config["request"])
@@ -478,10 +509,7 @@ def detect_run(run_dir: Path) -> None:
     obs_fingerprint = None
     if any(zone.ignoreDetections for zone in request.integrityZones) and (run_dir / "observations.ref.json").exists():
         obs_fingerprint = read_json(run_dir / "observations.ref.json").get("fingerprint")
-    fingerprint = {"version": INTEGRITY_VERSION, "source": meta["sha256"],
-                   "zones": [z.model_dump() for z in request.integrityZones],
-                   "observations": obs_fingerprint}
-    key = digest(fingerprint)
+    key = cache_key(meta, request.integrityZones, obs_fingerprint)
     cache_root = Path(config["cacheRoot"])
     cache = cache_root / f"{key}.json"
     sidecar = cache_root / f"{key}.integrity"

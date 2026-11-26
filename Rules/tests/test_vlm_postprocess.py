@@ -168,7 +168,7 @@ def test_live_worker_uses_same_policy_and_keeps_invalid_output_failed(tmp_path, 
             body = {**answer_body(next(answers), condition_time=15.0), "videoDescription": "目标沿通道前进后离开画面，后续过程未被观察窗口覆盖。"} if not invalid else None
             return ("invalid" if invalid else json.dumps(body)), {"generationTruncated": False}
 
-    def build_sample(_dir, _config, _request, _candidate, start, end, _sample_id):
+    def build_sample(_dir, _config, _request, _candidate, start, end, _sample_id, render=True):
         return None, {}, {"window": {"startSec": start, "endSec": end}, "quality": deepcopy(quality()),
                           "sampleTimesSeconds": [], "sourceFrameIndices": []}
 

@@ -468,3 +468,41 @@ def test_import_folder_batches_videos_and_reports_failures(client, tmp_path, mon
     make_clip(outside / "outside.mp4")
     assert client.post("/api/vlm/videos/import-folder", json={"path": str(outside)}).status_code == 400
     assert client.post("/api/vlm/videos/import-folder", json={"path": str(media / "a.mp4")}).status_code == 400
+
+
+def test_artifact_endpoint_renders_missing_preview_on_demand(client, tmp_path):
+    import sqlite3
+
+    from ultra_rules.vlm.contracts import RunRequest
+    from ultra_rules.vlm.media import probe
+    from ultra_rules.vlm.sampling import build_sample
+
+    source = make_clip(tmp_path / "lazy-source.mp4")
+    meta = {**probe(str(source)), "sha256": "x"}
+    run = api.DATA_ROOT / "runs" / "lazy-run"
+    run.mkdir(parents=True)
+    request = RunRequest(videoId="v1", pois=[{"id": "line", "kind": "line", "points": [[.5, .1], [.5, .9]]}],
+                         events=[{"id": "e", "description": "test"}], previewMode="lazy")
+    write_json(run / "request.json", {"request": request.model_dump(), "sourcePath": str(source), "video": meta})
+    person = {"trackId": 1, "trackSegmentId": "1-1", "bbox": [24, 16, 72, 48], "bboxConf": .9,
+              "identityAmbiguous": False, "keypoints": [{"x": 48, "y": 32, "conf": .9} for _ in range(17)]}
+    with sqlite3.connect(run / "observations.sqlite") as db:
+        db.execute("CREATE TABLE observations (frame_index INTEGER PRIMARY KEY, time REAL NOT NULL, body TEXT NOT NULL)")
+        for i in range(25):
+            t = i / 25
+            body = {"frameIndex": i, "mediaTimeSec": t, "timeSource": "pts", "sourcePtsSec": t,
+                    "persons": [person]}
+            db.execute("INSERT INTO observations VALUES (?, ?, ?)", (i, t, json.dumps(body)))
+        db.commit()
+    candidate = {"candidateId": "c", "trackId": 1, "trackSegmentId": "1-1", "poiId": "line",
+                 "triggerKind": "line.cross", "direction": "negative_to_positive", "triggerSec": .5,
+                 "confirmedSec": .6, "eventDefinitionIds": ["e"], "identityAmbiguous": False}
+    build_sample(run, {"sourcePath": str(source), "video": meta}, request, candidate, 0.0, 1.0, "s0")
+    assert not (run / "previews" / "s0.jpg").exists()
+
+    response = client.get("/api/vlm/runs/lazy-run/artifacts/previews/s0.jpg")
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("image/jpeg")
+    assert (run / "previews" / "s0.jpg").is_file()
+    # Missing manifests stay 404 instead of triggering a render or crashing.
+    assert client.get("/api/vlm/runs/lazy-run/artifacts/previews/missing.jpg").status_code == 404

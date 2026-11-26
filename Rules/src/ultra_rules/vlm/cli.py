@@ -43,7 +43,7 @@ def prepare(run_dir: Path, request: RunRequest, source: Path, video: dict, data_
 def main():
     parser = argparse.ArgumentParser(description="POI-triggered Qwen3-VL offline analysis")
     sub = parser.add_subparsers(dest="command", required=True)
-    for phase in ("segment", "tracking", "cues", "integrity", "understanding", "reprocess"):
+    for phase in ("segment", "tracking", "cues", "integrity", "detect", "understanding", "reprocess"):
         sub.add_parser(phase).add_argument("--run-dir", type=Path, required=True)
     analyze = sub.add_parser("analyze")
     analyze.add_argument("--input", type=Path, required=True)
@@ -69,6 +69,9 @@ def main():
     elif args.command == "integrity":
         from .integrity import detect_run
         detect_run(args.run_dir)
+    elif args.command == "detect":
+        from .combined import analyze_run
+        analyze_run(args.run_dir)
     elif args.command == "understanding":
         from .qwen_worker import understand
         understand(args.run_dir)

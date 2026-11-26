@@ -48,6 +48,9 @@ _pending_uploads: dict[str, dict] = {}
 # launches them in submission order. State lives on disk, so the queue survives
 # a backend restart and the browser can re-attach by polling /runs?active=true.
 MAX_CONCURRENT = 1
+# Lazy evidence previews are generated on first artifact access; serialize the
+# rare render so two requests cannot write the same JPEG concurrently.
+_preview_lock = threading.Lock()
 _scheduler_lock = threading.RLock()
 _scheduler_stop = threading.Event()
 _scheduler_thread: threading.Thread | None = None
@@ -684,8 +687,24 @@ def results(run_id: str, offset: int = Query(default=0, ge=0), limit: int = Quer
 def artifact(run_id: str, path: str):
     folder = directory("runs", run_id).resolve()
     target = (folder / path).resolve()
-    if not target.is_relative_to(folder) or Path(path).parts[0] not in {"previews", "samples", "raw"}:
+    parts = Path(path).parts
+    if not target.is_relative_to(folder) or parts[0] not in {"previews", "samples", "raw"}:
         raise HTTPException(400, "Invalid artifact path")
-    if not target.is_file() or target.suffix not in {".jpg", ".json", ".txt"}:
+    if target.suffix not in {".jpg", ".json", ".txt"}:
+        raise HTTPException(404, "Artifact not found")
+    if not target.is_file() and parts[0] == "previews" and target.suffix == ".jpg":
+        sample_id = target.stem
+        manifest = folder / "samples" / f"{sample_id}.json"
+        if manifest.is_file():
+            with _preview_lock:
+                if not target.is_file():
+                    try:
+                        from ultra_rules.vlm.sampling import render_preview
+                        render_preview(folder, sample_id)
+                    except Exception:
+                        # Missing source/observations simply leaves the artifact
+                        # unavailable; the result and source video still work.
+                        pass
+    if not target.is_file():
         raise HTTPException(404, "Artifact not found")
     return FileResponse(target)

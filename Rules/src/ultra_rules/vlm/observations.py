@@ -33,6 +33,21 @@ def _chunks(items, size: int):
         yield chunk
 
 
+# observations.sqlite is a transient artifact: the gzip cache is the completion
+# marker and a partial DB is deleted before a retry. Trading durability for
+# insert speed is therefore safe, and batching commits avoids thousands of fsyncs
+# on multi-hour recordings.
+OBSERVATION_COMMIT_ROWS = 200
+OBSERVATION_PROGRESS_ROWS = 50
+
+
+def open_observations_db(path: Path):
+    db = sqlite3.connect(path)
+    db.execute("PRAGMA journal_mode=MEMORY")
+    db.execute("PRAGMA synchronous=OFF")
+    return db
+
+
 SUPPORT_TRIGGERS = ("line.cross", "zone.enter", "zone.leave", "initial_inside")
 
 
@@ -63,12 +78,16 @@ class _FramePipeline:
     生产线程做解码 + bgr24 转换，使 CPU 段与 GPU 推理重叠；有界队列
     提供背压并封顶内存（1080p 单帧约 6MB）。FIFO 保证帧序；生产端异常
     在消费端重新抛出。close() 后生产线程自行退出（daemon 兜底）。
+
+    ``convert=False`` 时队列携带原始 VideoFrame，让需要多处消费同一帧的
+    调用方只在实际取用时转换一次 BGR。
     """
 
-    def __init__(self, frames, maxsize: int):
+    def __init__(self, frames, maxsize: int, convert: bool = True):
         self._queue: queue.Queue = queue.Queue(maxsize=maxsize)
         self._stop = threading.Event()
         self._error: list[BaseException] = []
+        self._convert = convert
         self._thread = threading.Thread(target=self._produce, args=(frames,), daemon=True)
         self._thread.start()
 
@@ -86,7 +105,7 @@ class _FramePipeline:
             for index, t, source_type, frame in frames:
                 item = (index, t, source_type, frame.width, frame.height,
                         float(frame.time) if frame.time is not None else None,
-                        frame.to_ndarray(format="bgr24"))
+                        frame.to_ndarray(format="bgr24") if self._convert else frame)
                 if not self._put(item):
                     return
         except BaseException as exc:
@@ -116,10 +135,31 @@ class _FramePipeline:
                 break
 
 
+def tracker_config_for(request):
+    """Tracker YAML shared by the tracking-only and combined detect phases."""
+    import ultralytics
+    import yaml
+
+    config = yaml.safe_load((Path(ultralytics.__file__).parent / "cfg/trackers/bytetrack.yaml").read_text())
+    config["track_buffer"] = max(1, round(request.poseFps * request.maxGapSeconds))
+    return config, ultralytics.__version__
+
+
+def cache_fingerprint(request, meta, model, batch, tracker_config, ultralytics_version):
+    """Observation cache identity; combined tracking must produce the same key."""
+    return {"version": VERSION, "source": meta["sha256"], "model": file_hash(model),
+            "poseFps": request.poseFps, "conf": request.conf, "iou": request.iou,
+            "tracker": tracker_config, "ultralytics": ultralytics_version,
+            "device": request.poseDevice, "timePolicy": "pyav-origin-scheduled-v1",
+            # 批量前向可能引入数值微差，缓存按推理模式隔离；
+            # pipeline 不改变结果，不入指纹（开关间共享缓存）。
+            "poseBatch": batch, "poseInfer": "batch-bytetrack" if batch > 1 else "ultralytics-track",
+            "posePrecision": "fp32-deterministic" if batch > 1 else "default"}
+
+
 def track(run_dir: Path):
     # Imported only inside the YOLO process, never by the Qwen worker/API schema.
     import torch
-    import ultralytics
     import yaml
 
     from ..pose_adapter import PoseAdapter
@@ -140,18 +180,10 @@ def track(run_dir: Path):
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.benchmark = False
         torch.backends.cudnn.deterministic = True
-    tracker_config = yaml.safe_load((Path(ultralytics.__file__).parent / "cfg/trackers/bytetrack.yaml").read_text())
-    tracker_config["track_buffer"] = max(1, round(request.poseFps * request.maxGapSeconds))
+    tracker_config, ultralytics_version = tracker_config_for(request)
     tracker_path = run_dir / "tracker.yaml"
     tracker_path.write_text(yaml.safe_dump(tracker_config))
-    fingerprint = {"version": VERSION, "source": meta["sha256"], "model": file_hash(model),
-                   "poseFps": request.poseFps, "conf": request.conf, "iou": request.iou,
-                   "tracker": tracker_config, "ultralytics": ultralytics.__version__,
-                   "device": request.poseDevice, "timePolicy": "pyav-origin-scheduled-v1",
-                   # 批量前向可能引入数值微差，缓存按推理模式隔离；
-                   # pipeline 不改变结果，不入指纹（开关间共享缓存）。
-                   "poseBatch": batch, "poseInfer": "batch-bytetrack" if batch > 1 else "ultralytics-track",
-                   "posePrecision": "fp32-deterministic" if batch > 1 else "default"}
+    fingerprint = cache_fingerprint(request, meta, model, batch, tracker_config, ultralytics_version)
     key = digest(fingerprint)
     cache = Path(config["cacheRoot"]) / f"{key}.jsonl.gz"
     cache.parent.mkdir(parents=True, exist_ok=True)
@@ -159,9 +191,8 @@ def track(run_dir: Path):
     progress(run_dir, stage="tracking", sampledFrames=0, candidateCount=0, cacheHit=cache_hit,
              poseBatch=batch, pipeline=pipeline)
     tracker = PoiTracker(request)
-    db = sqlite3.connect(run_dir / "observations.sqlite")
+    db = open_observations_db(run_dir / "observations.sqlite")
     db.execute("CREATE TABLE observations (frame_index INTEGER PRIMARY KEY, time REAL NOT NULL, body TEXT NOT NULL)")
-    db.execute("CREATE INDEX observation_time ON observations(time)")
     adapter = None
 
     def generate():
@@ -197,12 +228,16 @@ def track(run_dir: Path):
 
     tmp = cache.with_suffix(f".{run_dir.name}.tmp")
     reader = gzip.open(cache, "rt", encoding="utf-8") if cache_hit else None
-    writer = gzip.open(tmp, "wt", encoding="utf-8") if not cache_hit else None
+    writer = gzip.open(tmp, "wt", encoding="utf-8", compresslevel=1) if not cache_hit else None
     count, candidates, last_t = 0, 0, 0.0
+    pending_db: list[tuple] = []
     started = time.perf_counter()
     try:
         rows = (json.loads(line) for line in reader) if reader else generate()
         for row in rows:
+            # The cache stores the pre-tracker row; observations.sqlite stores the
+            # post-update row (PoiTracker adds trackSegmentId/identityAmbiguous
+            # in place, and build_sample relies on those fields).
             if writer:
                 writer.write(json.dumps(row, ensure_ascii=False, allow_nan=False) + "\n")
             for candidate in tracker.update(row):
@@ -213,14 +248,21 @@ def track(run_dir: Path):
                         candidate["supportRuleIds"] = support
                     append_json(run_dir / "candidates.jsonl", candidate)
                     candidates += 1
-            db.execute("INSERT INTO observations VALUES (?, ?, ?)",
-                       (row["frameIndex"], row["mediaTimeSec"], json.dumps(row, ensure_ascii=False)))
+            body = json.dumps(row, ensure_ascii=False, allow_nan=False)
+            pending_db.append((row["frameIndex"], row["mediaTimeSec"], body))
             count += 1
             last_t = row["mediaTimeSec"]
-            if count % 25 == 0:
+            if len(pending_db) >= OBSERVATION_COMMIT_ROWS:
+                db.executemany("INSERT INTO observations VALUES (?, ?, ?)", pending_db)
+                pending_db.clear()
                 db.commit()
+            if count % OBSERVATION_PROGRESS_ROWS == 0:
                 progress(run_dir, sampledFrames=count, candidateCount=candidates, mediaTimeSec=last_t,
                          trackingFraction=min(1, last_t / meta["durationSec"]))
+        if pending_db:
+            db.executemany("INSERT INTO observations VALUES (?, ?, ?)", pending_db)
+            pending_db.clear()
+        db.execute("CREATE INDEX IF NOT EXISTS observation_time ON observations(time)")
         db.commit()
         if not count:
             raise ValueError("No observations decoded")

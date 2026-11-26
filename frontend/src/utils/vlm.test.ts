@@ -63,6 +63,8 @@ describe('VLM task progress', () => {
     expect(vlmProgress({ state: 'segment' }).percent).toBe(4)
     expect(vlmProgress({ state: 'tracking', progress: { trackingFraction: .5 } }).percent).toBe(24)
     expect(vlmProgress({ state: 'integrity', progress: { integrityFraction: .5 } }).percent).toBe(52)
+    expect(vlmProgress({ state: 'detect', progress: { trackingFraction: .5 } }).percent).toBe(24)
+    expect(vlmProgress({ state: 'detect', progress: { trackingFraction: 1, integrityFraction: .5 } }).percent).toBe(46)
     expect(vlmProgress({ state: 'understanding', progress: { completedRequests: 5, totalRequests: 10 } }).percent).toBe(77)
     expect(vlmProgress({ state: 'understanding' }).percent).toBe(54)
     expect(vlmProgress({ state: 'completed' }).percent).toBe(100)

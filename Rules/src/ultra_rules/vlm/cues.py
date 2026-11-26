@@ -7,6 +7,7 @@ layer can gate the VLM instead of asking a small model to read a thin light.
 from __future__ import annotations
 
 import json
+from collections import defaultdict
 from pathlib import Path
 
 import numpy as np
@@ -48,28 +49,43 @@ def _red_ratio(bgr_crop: np.ndarray, mask: np.ndarray, cue: CueDefinition):
     return float(active.sum()) / total if total else 0.0
 
 
+class _Hysteresis:
+    """Streaming on/off fold so a shared decode pass needs no sample buffers."""
+
+    def __init__(self, cue: CueDefinition):
+        self.cue = cue
+        self.intervals: list[list[float]] = []
+        self.on_start: float | None = None
+        self.last_on: float | None = None
+        self.off_start: float | None = None
+
+    def feed(self, t: float, is_on: bool):
+        if is_on:
+            self.off_start = None
+            if self.on_start is None:
+                self.on_start = t
+            self.last_on = t
+        elif self.on_start is not None:
+            if self.off_start is None:
+                self.off_start = t
+            if t - self.off_start >= self.cue.minOffSec:
+                if self.last_on - self.on_start >= self.cue.minOnSec:
+                    self.intervals.append([round(self.on_start, 3), round(self.last_on, 3)])
+                self.on_start = self.last_on = self.off_start = None
+
+    def finish(self):
+        if self.on_start is not None and self.last_on - self.on_start >= self.cue.minOnSec:
+            self.intervals.append([round(self.on_start, 3), round(self.last_on, 3)])
+            self.on_start = self.last_on = self.off_start = None
+        return self.intervals
+
+
 def _hysteresis(samples, cue: CueDefinition):
     """Collapse a per-sample on/off signal into persistent on intervals."""
-    intervals: list[list[float]] = []
-    on_start: float | None = None
-    last_on: float | None = None
-    off_start: float | None = None
+    fold = _Hysteresis(cue)
     for t, is_on in samples:
-        if is_on:
-            off_start = None
-            if on_start is None:
-                on_start = t
-            last_on = t
-        elif on_start is not None:
-            if off_start is None:
-                off_start = t
-            if t - off_start >= cue.minOffSec:
-                if last_on - on_start >= cue.minOnSec:
-                    intervals.append([round(on_start, 3), round(last_on, 3)])
-                on_start = last_on = off_start = None
-    if on_start is not None and last_on - on_start >= cue.minOnSec:
-        intervals.append([round(on_start, 3), round(last_on, 3)])
-    return intervals
+        fold.feed(t, is_on)
+    return fold.finish()
 
 
 def detect_timeline(source: Path, meta: dict, cue: CueDefinition):
@@ -91,7 +107,29 @@ def detect_timeline(source: Path, meta: dict, cue: CueDefinition):
 
 
 def detect_all(source: Path, meta: dict, cues: list[CueDefinition]):
-    return {cue.id: detect_timeline(source, meta, cue) for cue in cues}
+    """Scan once per distinct cue sample rate, not once per cue.
+
+    Every signal zone in the same fps group shares one decode pass: the frame is
+    converted to BGR once and each ROI is measured from that array. The default
+    10 fps configuration therefore decodes a recording once for all zones.
+    """
+    if not cues:
+        return {}
+    prepared = {}
+    for cue in cues:
+        mask, bbox = _roi_mask(cue, meta["width"], meta["height"])
+        prepared[cue.id] = (cue, mask, bbox, _Hysteresis(cue))
+    groups: dict[float, list[CueDefinition]] = defaultdict(list)
+    for cue in cues:
+        groups[float(cue.sampleFps)].append(cue)
+    for fps, group in groups.items():
+        for _index, t, _source, frame in sampled(source, meta, fps):
+            bgr = frame.to_ndarray(format="bgr24")
+            for cue in group:
+                _cue, mask, (x0, y0, x1, y1), fold = prepared[cue.id]
+                crop = bgr[y0:y1, x0:x1]
+                fold.feed(t, crop.size > 0 and _red_ratio(crop, mask, cue) >= cue.minOnRatio)
+    return {cue.id: {"intervals": prepared[cue.id][3].finish()} for cue in cues}
 
 
 def _otsu(values: np.ndarray):
@@ -175,6 +213,12 @@ def calibrate(source: Path, meta: dict, cue: CueDefinition, max_samples: int = 4
     return result
 
 
+def cache_key(meta: dict, cues: list[CueDefinition]) -> str:
+    """Stable cache key shared by the cues-only and combined detect phases."""
+    return digest({"version": CUE_VERSION, "source": meta["sha256"],
+                   "cues": [cue.model_dump() for cue in cues]})
+
+
 def detect_run(run_dir: Path):
     config = read_json(run_dir / "request.json")
     request = RunRequest.model_validate(config["request"])
@@ -184,10 +228,7 @@ def detect_run(run_dir: Path):
         return
     source = Path(config["sourcePath"])
     meta = config["video"]
-    fingerprint = {"version": CUE_VERSION, "source": meta["sha256"],
-                   "cues": [c.model_dump() for c in request.cues]}
-    key = digest(fingerprint)
-    cache = Path(config["cacheRoot"]) / f"{key}.json"
+    cache = Path(config["cacheRoot"]) / f"{cache_key(meta, request.cues)}.json"
     if cache.exists():
         result = json.loads(cache.read_text(encoding="utf-8"))
     else:

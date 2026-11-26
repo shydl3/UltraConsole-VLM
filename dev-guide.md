@@ -33,7 +33,7 @@
 
 **本轮完善视频输入与批量处理**：浏览器不能直接播放的源**不再自动转码**，页面先显示首帧供绘制区域，用户按需点「生成预览」；语义分析面板新增「批量处理」，可一次导入一个文件夹内的全部视频，同一机位共用一套区域与规则，任务按队列连续执行（见 4.9）。
 
-**长视频吞吐 / 显卡利用率（现状与下一步）**：目前处理几小时的录像时，两条分析链路都是“逐帧串行”——取画面、显卡推理、事件计算轮流等待，显卡大部分时间空闲。本轮已完成第一期提效施工（tracking 解码/推理流水线 + 批量姿态推理，默认关闭、可开关），并在真实 25 分钟监控录像上实测：**语义无损的出厂配置提速约 1.19×**；本机属推理瓶颈而非解码瓶颈，更大空间在“基础分析离线批处理”与“understanding 批处理”（见 6.4.5）。所有提效改动以“不改变任何判定结论”为前提，默认保守串行。
+**长视频吞吐 / 显卡利用率（现状与下一步）**：本轮已完成性能路线 P0/P1/P2（`optimize.md`，与第 1 节的准确率 P0/P1/P2 无关）：tracking + cues + integrity 合并为只解码一次的 `detect` 阶段；integrity 多区共享解码；确定性证据默认 lazy 预览（只写 manifest，首次查看时生成 JPEG）。真实 30 分钟任务完整 `detect` 实测 **179.7 秒**（P3 I/O 优化后；旧分开阶段约 6 分钟），5 分钟任务 understanding 复算 **0.41 秒**、0 个预览。P3 tracking I/O/缓存优化已完成：tracking 100.8→89.3 秒，逐帧零漂移；TensorRT/NVDEC 仍待评测。tracking 的 batch/pipeline 仍默认保守，实测 1.19×（6.4.5）；下一步是 P4 队列/ETA（见 6.4.7）。所有提效改动以“不改变任何判定结论”为前提。
 
 **接下来要做的（按优先级）：**
 
@@ -68,19 +68,23 @@
 后端 event_rules.resolve()  →  RunRequest(request.json)
         │
         ▼
-runner.py 依次执行三个子进程阶段：
-  ① tracking    姿态跟踪：YOLO-Pose + ByteTrack → observations.sqlite
-  ② cues        信号检测：CV 红灯检测 → cues.json（可选，仅当规则绑定了信号区）
-  ③ understanding 判定：
+runner.py 阶段序列（子进程）：
+  segment
+  detect（cues + integrity 同时存在）—— 一次解码、多消费者：
+        · tracking  → observations.sqlite + candidates.jsonl
+        · cues      → cues.json
+        · integrity → integrity.json
+    （仅 cues 或仅 integrity 时：tracking → cues / integrity 分开执行）
+  understanding 判定：
         · poi_event 规则：POI 候选 → 确定性门禁 / VLM → results.jsonl
         · forced_passage 规则：信号 episode + 通道配对 → 目标/退回 → results.jsonl
         · integrity 规则：完整性变化区间 → CV 判定 → results.jsonl
         │
         ▼
-前端轮询 /runs 与 /results，展示结果 + 证据截图
+前端轮询 /runs 与 /results，展示结果 + 证据截图（预览可按需生成）
 ```
 
-> 完整阶段序列为 `segment → tracking → cues（可选）→ integrity（可选）→ understanding`（`runner.py`）；上图省略了 segment 与 integrity 两个阶段。各阶段的串行点与 GPU 空闲来源见 3.4；信号触发规则见 4.8；视频输入/首帧绘制/文件夹批量见 3.5。
+> 完整阶段序列为 `segment → detect（或 tracking → cues/integrity）→ understanding`（`runner.py`）。`detect` 由 `vlm/combined.py` 实现，`media.SampleSchedule` 让 pose / cue / integrity 各自按原采样率消费同一解码流；各阶段串行点见 3.4，信号触发规则见 4.8，lazy 预览见 6.4.7。
 
 ### 3.2 候选事件如何生成（时间点）
 
@@ -93,7 +97,7 @@ runner.py 依次执行三个子进程阶段：
 
 - `Rules/src/ultra_rules/vlm/qwen_worker.py` 的 `understand()` 按规则类别分流：
   - **`poi_event`（通行/计数）**：对每个 POI 候选，若规则绑定了**信号区（cueIds）** → 先走 `decision.py` 的确定性判定；确定性给出 `match` / `no_match` → 直接出结果，不调用大模型；无法判定（`uncertain`）→ 交给 VLM 复核（结构化逐条件输出 + 默认否认提示词，见 6.2）。
-  - **`forced_passage`（强行通过）**：由 `_cue_pairs()` 从 `cues.json` 生成信号 episode 候选，`_process_cue_candidate()` 做纯确定性判定：选最近正向跨入口线的目标 → 从进入时刻起 5 秒内找反向跨线/离开计数区 → `match`（未退回）/ `no_match`（退回）。默认不调用 VLM；无人通过输出 `no_match + no_subject` 审计记录。详见 4.8。
+  - **`forced_passage`（强行通过）**：由 `_cue_pairs()` 从 `cues.json` 生成信号 episode 候选，`_process_cue_candidate()` 做纯确定性判定：选最近正向跨入口线的目标 → 从进入时刻起 5 秒内找反向跨线/离开计数区 → `match`（未退回）/ `no_match`（退回）。默认不调用 VLM；无人通过输出 `no_match + no_subject` 审计记录，**且不抽帧/不生成证据**。有目标的确定性结果默认只写 sample manifest（`previewMode=lazy`），预览在首次查看时由后端生成；VLM/dryRun 仍 eager。详见 4.8、6.4.6 与 6.4.7。
   - **`integrity`（完整性）**：按完整性区间走 CV 判定（`_process_integrity`），不依赖跟踪候选。
 - `Rules/src/ultra_rules/vlm/results.py` 负责解析模型回答与聚合（当前版本 `model-decision-v5`）：解析模型逐条件输出 `conditions`（`index / status(yes|no|unknown) / evidenceTimeSec`），由 `decision_from_conditions` 按**合取真值表**计算 decision（任一 `no`→`no_match`；全 `yes`→`match`；否则 `uncertain`），模型自由文本结论降级为 `modelDecision` 仅供对照；证据时间做校验（越窗 / 约等于 `triggerSec` / 缺失 → 该条件降级 `unknown` 并记警告）；`conditions` 缺失或数量不符则回退采信 `modelDecision`（保持 v4 行为）。质量项（可见度 / 帧数 / 目标过小）仅作 advisory 警告，不否决。
 
@@ -122,25 +126,29 @@ VideoTab.analyze()：每采样帧一次完整往返，同一时刻仅 1 帧在�
 
 ```
 runner.run()：持 worker.lock，子进程阶段严格串行
-  segment → tracking → cues(可选) → integrity(可选) → understanding
+  segment → detect（cues+integrity）或 tracking → cues/integrity → understanding
   （vlm_api._pump：MAX_CONCURRENT=1，全局同时仅一个 run）
 
-tracking（observations.track，单进程单线程生成器）：
-  media.sampled 全帧软解 → 采样帧 to_ndarray(bgr24)（CPU）
-    → PoseAdapter.infer 单帧 YOLO.track（GPU）
-    → JSON 序列化 + sqlite/gzip 写入 + PoiTracker.update（CPU）
-  ——解码时 GPU 闲，推理时 CPU 闲，逐帧交替
+detect（vlm/combined.py: analyze_run）：
+  缓存未命中时 media.decoded 全帧软解一次（CPU）
+    SampleSchedule 分发给 pose / cue / integrity：
+      pose（poseFps）→ 批量 YOLO-Pose（GPU）→ observations.sqlite/candidates
+      cue（cue.sampleFps）→ 红灯 ROI ratio → cues.json
+      integrity（zone.sampleFps）→ 复用最近 pose persons 做遮挡排除 → integrity.json
+  ——解码只做一次；解码与 GPU 推理可通过 ULTRA_VLM_PIPELINE 重叠
+  缓存命中时：track() 重放 observations（不推理） + detect_run() 只做 cues/integrity
 
-cues / integrity：各自再次调用 media.sampled，把整个文件重新解码一遍
+仅 cues 或仅 integrity：tracking 仍单独跑，紧随其后的 CV 阶段再解码一次
 
 understanding（qwen_worker.understand）：
   逐候选 × 逐绑定事件 × 逐窗口（sampling.windows：16s 分段、重叠 2s）
-    build_sample（CPU：查 sqlite + seek 抽帧 + 画标注 + 拼图）
-    → Qwen.infer batch=1 生成（GPU）→ 解析/落盘（CPU）
+    确定性结果：build_sample(render=False) 只查 sqlite + 写 manifest（不抽帧/不拼图）
+    VLM/dryRun：build_sample(render=True) 抽帧 + 画标注 + 拼图 → Qwen.infer → 解析/落盘
+    预览：确定性结果的 previews/*.jpg 由后端 artifact 端点首次访问时 render_preview() 生成
 ```
 
-- 串行点：`Rules/src/ultra_rules/vlm/runner.py` 阶段 for 循环；`vlm/observations.py` 的 `generate()`；`vlm/qwen_worker.py` 的 `_process_candidate()` 窗口 for 循环；`backend/app/vlm_api.py` 的 `MAX_CONCURRENT=1` + `worker.lock`。
-- GPU 空闲来源：解码/转换/抽帧/画图/写盘等 CPU 段与 GPU 段交替；batch=1 生成填不满 SM；tracking→understanding 之间 GPU 完全空闲（Qwen 懒加载一次）。
+- 串行点：`Rules/src/ultra_rules/vlm/runner.py` 阶段 for 循环；`vlm/combined.py` 的 `analyze_run()` / `_track_and_detect()`；`vlm/qwen_worker.py` 的 `_process_candidate()` 窗口 for 循环；`backend/app/vlm_api.py` 的 `MAX_CONCURRENT=1` + `worker.lock`。
+- GPU 空闲来源：解码/转换/抽帧/画图/写盘等 CPU 段与 GPU 段交替；batch=1 生成填不满 SM；detect→understanding 之间仍有模型加载空档（Qwen 懒加载一次）。
 
 **多事件规则如何共享计算（成本随规则数的增长关系）**
 
@@ -181,7 +189,7 @@ understanding（qwen_worker.understand）：
 | 首帧绘制 + 手动预览 | 不可直放源显示首帧并可绘制区域；「生成预览」显式触发 remux/GPU 转码；语义分析不依赖浏览器预览（见 4.9） | ✅ 已完成（本轮） |
 | 文件夹批量处理 | 「批量处理」一次导入当前文件夹全部视频（非递归、SHA-256 复用、失败项单独返回）；同机位共用区域/规则，队列连续执行（见 4.9） | ✅ 已完成（本轮） |
 | 复核窗口排版 + 处理时长 | 修复右侧网格行/通用按钮样式导致的筛选栏与结果重叠；头部显示处理时长；窄屏整页滚动（见 4.3） | ✅ 已完成（本轮） |
-| PT 性能与吞吐专项 | PT0-1/2 批量姿态 + 解码/推理重叠已实现并实测（默认关，语义无损 1.19×）；基线/回归脚本落地；PT0-3/4/5、PT1、PT2 待做（见 6.4） | 🔶 部分完成 |
+| PT 性能与吞吐专项 | 性能 P0/P1/P2 已完成；P3 I/O/缓存完成（tracking -11.4%）；PT0-1/2 批量姿态/重叠默认关（1.19×）；PT0-4/5、P3 模型/解码评测、PT1、PT2 待做（见 6.4.7） | 🔶 部分完成 |
 | P1（其余：证据 / 模型） | 高分辨率 ROI 抽帧、4B/8B、self-consistency、置信度校准 | ⬜ 待做 |
 | P2（评测 / 生产化） | 标注集、指标、人工复核、监控 | ⬜ 待做 |
 
@@ -273,6 +281,7 @@ understanding（qwen_worker.understand）：
 - **校验**：强行通过必须有完整的入口线↔信号区配对且入口线有方向；只绘制完整性区时，启用非完整性规则会在开始分析前返回 422（“当前仅绘制了完整性区，只能启用完整性规则”）。前端规则编辑器同步显示行内错误并禁用开始按钮。
 - **代码落点**：`contracts.py`（category / cue.on / pairIndex / cueDedupeSec）、`observations.py`（支撑候选：信号规则仍需持久化跨线/进出事件）、`decision.py`（episodes / 目标选择 / 退回）、`qwen_worker.py`（`_cue_pairs` + `_process_cue_candidate`）、`backend/app/event_rules.py`（类别迁移 + 强制配对校验）、前端 `EventEditOverlay`（编号徽标）、`EventRulesEditor`（类别选择 + 配对表）、`ResultCard`/`ReviewVideo`（触发信号区与退回证据）。
 - **验证**：后端 + Rules 全量通过（当轮 208；当前全量 **210 passed / 1 skipped**，新增 `Rules/tests/test_cue_trigger.py`、`backend/tests/test_event_rules.py` 用例），ruff 全绿；前端 **46 用例**、eslint、build 通过。实机验证：规则库迁移后 `forced_passage_unopposed` 为 `category=forced_passage / triggers=["cue.on"] / pre=8 / cueDedupeSec=3 / v3`；仅完整性区 + 非完整性规则的实机 POST 返回预期的 422 中文提示；前端 headless 冒烟可见类别、配对表与行内校验。
+- **性能（2026-11-26）**：tracking + cues + integrity 已合并为 `detect` 阶段，只解码一次；30 分钟真实任务 P0 时 193.6s，P3 I/O 后 **179.7s**（旧分开阶段约 6 分钟），observations/candidates/cues/integrity 逐项一致。确定性证据默认 lazy，只写 sample manifest；165 条结果 understanding 复算 0.41s、0 预览。详见 6.4.7。
 - **未做**：尚未用含真实红灯的录像跑完整分析（手头样本无红灯），worker 逻辑由合成 `cues.json + candidates.jsonl` 的 `understand()` 集成测试覆盖。
 - 详细设计与验收标准见 `docs/signal-triggered-rules-plan.md`。
 
@@ -386,9 +395,9 @@ PYTHONPATH=Rules/src python -m ultra_rules.vlm.cli calibrate \
 4. **人工复核闭环 + 监控**
    - 复核队列、纠错写回、按相机/机位监控红灯检测漂移；规则 / 提示词 / 模型版本化。
 
-### 6.4 PT —— 性能与吞吐专项（⬜ 待做 / 提案；与 P0/P1/P2 正交，不占用既有编号）
+### 6.4 PT —— 性能与吞吐专项（P0–P6 性能路线；与第 1 节准确率 P0/P1/P2 无关）
 
-> **定位**：P0/P1/P2 解决“判得准”，PT 解决“判得快”。内部优先级 PT0（低成本先行）→ PT1（中等改动）→ PT2（高成本谨慎）。
+> **定位**：第 1 节的准确率 P0/P1/P2 解决“判得准”；本节 PT 解决“判得快”，性能路线编号 P0–P6 见 `optimize.md`（P0/P1/P2 已完成，P3–P6 待做）。内部优先级 PT0（低成本先行）→ PT1（中等改动）→ PT2（高成本谨慎）。
 > **红线（继承 4.1 / 7.3）**：一切提效以“不改变判定语义与准确率”为前提；不改 `poi.py` 候选生成；**信号触发路径不得改 3 秒 episode 去重、通道配对与退回窗口**；红灯仍 CV 检测、确定性优先 + VLM 仅复核；默认保守串行，并发/批大小只能以环境变量/参数开启；不预设加速比，量化一律以基线实测为准。
 
 #### 6.4.1 瓶颈量化模型与基线采集（PT0 第一步，不改代码）
@@ -427,8 +436,8 @@ T_端到端 ≈ T_segment + T_tracking + T_cues + T_integrity + T_understand
 | segment | 待实测 | 待实测 | 待实测 | |
 | tracking·解码 | 待实测（s/千帧） | 待实测 | — | 软解 / NVDEC 分别测；本机解码非瓶颈（6.4.5） |
 | tracking·姿态 | 待实测（ms/帧，纯推理） | 待实测 | 待实测 | 全阶段分摊 13.4ms/帧（串行）/ 11.3ms/帧（出厂配置），本轮实测（含解码/写盘） |
-| cues / integrity | 待实测 | — | — | 含重复解码成本 |
-| understanding·抽帧 | 待实测（s/窗口） | — | — | `build_sample` |
+| cues / integrity | 待实测 | — | — | `detect` 与 tracking 共享一次解码；cues-only/integrity-only 仍两阶段 |
+| understanding·抽帧 | 确定性 lazy 0；VLM 约 0.7s/窗口 | — | — | `build_sample(render=...)`；lazy 预览首次访问生成 |
 | understanding·生成 | 待实测（s/窗口） | 待实测 | 待实测 | |
 | 链路A·单帧往返 | 待实测（ms/帧） | 待实测 | 待实测 | seek/编码/推理分段计时 |
 
@@ -452,9 +461,11 @@ T_端到端 ≈ T_segment + T_tracking + T_cues + T_integrity + T_understand
 |---|---|---|---|---|
 | PT0-1 | ✅ 已实现（默认关；实测见 6.4.5）批量姿态推理：batch predict 前向 + 按帧序独立 BYTETracker 关联；**batch>1 强制 FP32 确定性**（TF32 批量在长视频上有 ID 漂移，已修复） | `Rules/src/ultra_rules/pose_adapter.py`、`vlm/observations.py` | 基线 + 逐条一致性回归；观测缓存指纹 bump（已做） | 高（GPU 占空比↑）/ 中（须验证 trackId 逐帧一致） |
 | PT0-2 | ✅ 已实现（默认关；比特一致）解码/推理流水线重叠：解码线程 → 有界帧队列 → 推理消费；HEVC 硬解（复用 `video_transcode.transcode_gpu` 的 cuvid/NVDEC 模式）仍待做 | `vlm/observations.py`、`vlm/media.py` | 可与 PT0-1 独立 | 高 / 低（队列上限控内存；NVDEC 需 NVIDIA） |
-| PT0-3 | ⬜ 本轮缓做：抽帧去重复用。**缓做原因**：`cue.sampleFps` / `zone.sampleFps` 各自独立且有状态采样调度（`media.sampled`），integrity 还依赖**已完成**的 observations.sqlite 做遮挡排除；朴素共享解码会改变采样点与 CV 结果（红线）。需多消费者采样器 + 阶段编排重构，升格为 PT1 级改动 | `vlm/runner.py` 阶段编排、`vlm/cues.py`、`vlm/integrity.py`、`vlm/media.py` | 多消费者采样器设计评审 | 中（长视频显著）/ 中 |
+| PT0-3 | ✅ **已完成（2026-11-26）**：`detect` 阶段用 `media.SampleSchedule` 让 tracking / cues / integrity 从同一次 `decoded()` 消费，异构 `poseFps`/`cue.sampleFps`/`zone.sampleFps` 均保留原采样点；integrity 用最近 pose persons 做遮挡排除（等价于 `_persons_near`）。30min 真实任务 observations 9038 行、candidates、cues、integrity 全部逐项一致（6.4.7）。剩余可选：cues-only/integrity-only 路径仍是两阶段；`_refine_onset` 可批量 seek | `vlm/combined.py`、`vlm/media.py`、`vlm/runner.py` | 已完成等价性回归 | 高（长视频显著）/ 中 |
 | PT0-4 | 确定性短路率提升：在既有“确定性优先”框架内统计 p、识别可安全扩大的可测量信号（不得放宽否决、不得改退回语义） | `vlm/decision.py`、`vlm/qwen_worker.py`（门禁统计） | **P2 标注集**验证不降准确率 | 随规则数↑ / 高（语义红线，无评测集不动） |
 | PT0-5 | 结果级缓存复用：按已有 `requestFingerprint` 跨 run 复用 understanding 结果（现状仅 run 内断点续跑） | `vlm/qwen_worker.py`、`vlm/storage.py` | 指纹含模型/提示词版本，变更即失效 | 中（改规则重跑场景）/ 低 |
+| PT0-6 | ✅ **已完成（2026-11-26）** lazy 证据预览：`previewMode=lazy` 时确定性结果只写 manifest；后端 artifact 端点首次访问生成 JPEG 并缓存；VLM/dryRun 仍 eager。165 条结果 understanding 0.41s、0 预览（6.4.7） | `vlm/sampling.py`、`vlm/contracts.py`、`vlm/qwen_worker.py`、`backend/app/vlm_api.py` | 无 | 高（密集信号/大结果集）/ 低（前端契约不变） |
+| PT0-7 | ✅ **已完成（2026-11-26）** tracking I/O/缓存：临时库 no-fsync、延迟索引、`executemany` 批量插入、gzip level1；tracking 100.8→89.3s（-11.4%），detect 193.6→179.7s（-7.2%），9038 帧零漂移（6.4.7） | `vlm/observations.py`、`vlm/combined.py` | 无 | 中 / 低（缓存可重建；旧 cache 兼容） |
 
 > 事实注记：观测缓存指纹不含规则/POI（`observations.py`），**改规则重跑 tracking 已命中缓存**，仅重算候选与判定——这是现有设计，不是待做项。
 
@@ -499,6 +510,7 @@ T_端到端 ≈ T_segment + T_tracking + T_cues + T_integrity + T_understand
 - P1④ self-consistency 会把 N_vlm ×2–3、4B 会抬高 t_vlm 与显存——届时 PT1-1 批处理收益更大，但批大小须按新显存基线重定。
 - **建议总排序**：PT0 基线测量（不改代码）→ P2 最小标注集 → PT0 工程优化 ∥ P1① 证据 → P1④ 模型对比 → PT1-1 批处理跟进 → PT1-4 链路 A 离线化（可与 PT0 并行立项，契约先评审）→ PT2 按需。
 - **本轮实测后的排序修正**：PT0 出厂配置在本机仅 1.19×（推理瓶颈，6.4.5），不是长视频的主收益项；**PT1-4（基础分析离线批处理，消灭逐帧 seek）与 PT1-1（understanding 批处理，多规则线性成本）优先级应提前**；PT0 开关保持默认关，经评测集回归后再议默认开启。
+- **2026-11-26 更新**：性能 P0/P1/P2 已完成（单次解码 `detect`、integrity 多区共享、lazy 预览），P3 I/O/缓存也已完成（tracking -11.4%，见 6.4.7）；下一步 P3 剩余模型/解码评测或 P4（队列、ETA、worker 分离）。PT1-4/PT1-1 与准确率评测集仍按原排序。
 
 #### 6.4.5 本轮实测结果（PT0 第一期；其余项仍 ⬜ 待做）
 
@@ -520,6 +532,80 @@ T_端到端 ≈ T_segment + T_tracking + T_cues + T_integrity + T_understand
 3. **本机 tracking 是推理瓶颈**：单开 pipeline 仅 1.06× → PT0 不是长视频主收益项；主收益在 PT1-4 / PT1-1。
 4. **GPU 利用率 / 显存峰值本轮未采集**（待实测，采集方法见 6.4.1）；120s 截段归因：串行 17.55s / 仅 pipeline 16.89s / 仅 batch8 15.46s（TF32）。
 
+#### 6.4.6 本轮修复：证据抽帧 seek 对齐与空 episode 短路（2026-11-26）
+
+**现象**：191 分钟录像的 understanding 阶段耗时约 63 分钟；11 个 cue episode 的证据样本每个约 5.5 分钟，远超信号检测（cues 阶段约 7 分钟）。
+
+**根因**：`sampling.source_images()` 以首个选中帧的 PTS 做 `container.seek(..., backward=True)`，但容器/开放 GOP 会落到目标帧之后的 0.1–1.2 秒；首个选中帧缺失后 `len(images) != len(rows)`，代码回退到 `decoded()` 从第 0 帧重新解码到目标帧。episode 越靠后，单个样本越慢，整体接近 O(episode × 视频位置)。
+
+**修复**：
+
+1. `source_images()` 改为“先向前回退 2.5s，再按需 8s / 30s 重试，取最近时间戳帧”，并用 `MAX_FRAME_DRIFT_SEC=0.5` 兜底；不再因缺 1 帧回退到全片解码。无 PTS 时可用 `mediaTimeSec + timeOriginSec` 走同一时间轴。
+2. `_process_cue_candidate()` 对 `no_subject` episode 跳过证据生成（只保留审计结果）；`poi_event` 候选在确定性 cue-off 时同样跳过抽帧，只保留 `no_match` 审计行。
+3. `understand()` 一次构建目标索引（`build_target_index`），`select_cue_target()` 用二分窗口查候选，避免每个 episode 全量扫描。
+4. `cues.detect_all()` 同采样率的信号区共享一次解码（BGR 只转换一次）。
+
+**实测**：同一 191 分钟、11 个 cue episode 的真实任务，understanding 从约 63 分钟降到 **6.8 秒**；11 条结果与修复前逐条 `resultId/decision/retreatSec/rawTriggerCount` 完全一致。单样本抽帧从约 5.5 分钟降到约 0.7 秒。
+
+**回归**：`Rules/tests` + `backend/tests` 全量通过（含新增 seek 重试、单次解码、空目标不抽帧、预构建索引用例）；ruff 全绿。
+
+> 6.4.6 是 P0a/P1 的第一步；随后 P0b 已把 tracking 也并入同一次解码，并完成 lazy 预览，见 6.4.7。
+
+#### 6.4.7 本轮性能 P0/P1/P2：单次解码、多区共享与 lazy 预览（2026-11-26）
+
+> 命名说明：本节 P0/P1/P2 指 `optimize.md` 的性能路线；第 1 节的准确率优先级仍称 P0/P1/P2，二者独立。
+
+**性能 P0/P1：tracking + cues + integrity 一次解码**
+
+- `Rules/src/ultra_rules/vlm/combined.py` 新增 `analyze_run()` / `_track_and_detect()` / `detect_run()`：
+  - `detect` 阶段用 `media.decoded()` 解码一次，`media.SampleSchedule` 按 `poseFps` / `cue.sampleFps` / `zone.sampleFps` 分发给三个消费者；
+  - tracking 保持原 batch/pipeline 行为（`_FramePipeline(convert=False)`，同一帧只按需转换一次 BGR）；
+  - integrity 的遮挡 persons 用最近 pose 结果（±1s 最近邻），等价于原 `_persons_near()` 的 sqlite 查询；
+  - `observations.cache_fingerprint()` / `tracker_config_for()` 被 tracking 与合并阶段共用，缓存键不漂移；
+  - runner 在 cues+integrity 同时存在时只跑 `segment → detect → understanding`；仅 cues 或仅 integrity 仍 `tracking → cues/integrity`。
+- 缓存命中：当前 run 无 `observations.sqlite` 时 `track()` 重放；已有完整 sqlite 时直接复用；缓存未命中但残留部分 sqlite 时先清理再重算。
+
+**实测（真实任务）**
+
+| 任务 | 完整 detect | 一致性 |
+|---|---:|---|
+| 30min（1 信号区 + 3 完整性区） | 193.6s → **179.7s**（P3 I/O 后；旧分开阶段约 6 分钟） | 9038 行 observations 逐字段一致；cues/integrity 完全一致 |
+| 5min（5 信号区 + 165 候选） | **32.9s** | 1500 行 observations + 165 条 candidates 完全一致；cues/integrity 一致 |
+| 同 run 二次 detect（全缓存） | **1.5s** | 不再解码、不再加载 pose 模型 |
+
+**性能 P2：lazy 证据预览**
+
+- `contracts.AnalysisParameters.previewMode` 新增，默认 `lazy`。
+- `sampling.build_sample(..., render=None)` 按 `previewMode` 决定：
+  - 确定性证据：`render=False`，只查 observations + 写 `samples/{id}.json`（含 window / sourceFrameIndices / sampleTimesSeconds / observations / quality / poi / width / height），**不调用 `source_images()`、不拼图**；
+  - VLM / dryRun：显式 `render=True`，仍需帧做推理/预览。
+- 后端 `GET /api/vlm/runs/{run_id}/artifacts/previews/{sample}.jpg` 在文件缺失时按 manifest 调 `sampling.render_preview()`，全局锁串行生成并缓存；manifest 缺失返回 404，结果与源视频不受影响。
+- 兼容：旧 eager 预览直接服务；前端继续用 `previewPath`，无契约变化。
+
+**性能 P2 实测**
+
+- 5min、165 条确定性候选复算：understanding **0.41s**，生成 **0 个预览 / 23 个 manifest**（其余为 cue-off 短路）；165 条公共候选判定与旧结果完全一致。
+- lazy 与 eager 的 manifest 完全一致；单目标样本预览字节一致。多人叠加时绘制顺序可能不同（lazy 先画旁人再画目标），视觉等价。
+
+**性能 P3：tracking I/O / 缓存（2026-11-26）**
+
+- `observations.open_observations_db()`：临时 observations.sqlite 使用 `journal_mode=MEMORY` + `synchronous=OFF`；gzip cache 才是完成标记，部分库可在重试时删除。
+- 延迟 `CREATE INDEX`，先 `executemany` 批量插入（每 200 行 commit），progress 每 50 行；减少 fsync、索引维护和进度写盘。
+- cache 写 `PoiTracker.update()` 之前的行，sqlite 写更新后的行（保留 `trackSegmentId/identityAmbiguous`；不能为省一次序列化而丢失字段）。
+- gzip cache `compresslevel=1`，牺牲压缩率换写入/读取速度；旧 cache 仍可读。
+- 实测（30min、9038 帧、batch16+pipeline+poseFps5）：tracking **100.8s → 89.3s（-11.4%）**；完整 detect **193.6s → 179.7s（-7.2%）**；observations 9038 行逐字段一致，bench diff 0 mismatch、bbox/kp delta 0.0。
+- 未做：TensorRT / ONNX / FP16 / NVDEC 独立环境评估；poseFps 默认值未改。
+- 测试：`Rules/tests/test_tracking_io.py::test_track_batch_sqlite_rows_keep_post_tracker_fields`。
+
+**回归**
+
+- 新增：`Rules/tests/test_combined.py`、`Rules/tests/test_lazy_preview.py`、`backend/tests/test_vlm_api.py::test_artifact_endpoint_renders_missing_preview_on_demand`，以及 `SampleSchedule` VFR 等价、runner 阶段选择、`no_subject`/cue-off 短路用例。
+- 当前全量：**223 passed / 1 skipped**；ruff 全绿；前端 **46 用例**、eslint、build 通过。
+
+**红线保持**：信号 episode 触发、3 秒去重、通道配对、从进入时刻起 5 秒退回、确定性优先均未改变；`poi.py` 候选生成未改。
+
+**下一步**：P3 剩余的 TensorRT/ONNX/FP16/NVDEC 独立评测，或 P4 队列/ETA/worker 分离；详见 `optimize.md`。
+
 ---
 
 ## 7. 开发者指引
@@ -530,22 +616,23 @@ T_端到端 ≈ T_segment + T_tracking + T_cues + T_integrity + T_understand
 
 | 路径 | 职责 |
 |---|---|
-| `Rules/src/ultra_rules/vlm/contracts.py` | 全部数据模型（Poi / CueDefinition / EventDefinition / RunRequest 等）；规则类别 `category`、`cue.on`、通道编号 `pairIndex`、信号去重 `cueDedupeSec` |
+| `Rules/src/ultra_rules/vlm/contracts.py` | 全部数据模型（Poi / CueDefinition / EventDefinition / RunRequest 等）；规则类别 `category`、`cue.on`、通道编号 `pairIndex`、信号去重 `cueDedupeSec`、预览模式 `previewMode`（默认 lazy） |
 | `Rules/src/ultra_rules/vlm/models.py` | 本地 Qwen3-VL 权重发现与校验（默认根目录为项目内 `models/`，不读项目外路径） |
-| `Rules/src/ultra_rules/vlm/observations.py` | 跟踪阶段：YOLO-Pose + ByteTrack → observations.sqlite；观测缓存指纹不含规则/POI（改规则重跑命中缓存）；`candidate_owners()` 区分直接判定候选与信号规则的支撑候选 |
-| `Rules/src/ultra_rules/vlm/runner.py` | 阶段协调子进程：`worker.lock` 互斥、阶段串行/超时/取消、status 写入 |
-| `Rules/src/ultra_rules/vlm/media.py` | 统一解码与时间基：`probe / decoded`（全帧软解）/ `sampled`（按 fps 采样）；tracking/cues/integrity 各自调用（重复解码点，见 3.4） |
+| `Rules/src/ultra_rules/vlm/observations.py` | 跟踪阶段：YOLO-Pose + ByteTrack → observations.sqlite；观测缓存指纹不含规则/POI（改规则重跑命中缓存）；`candidate_owners()` 区分直接判定候选与信号规则的支撑候选；`cache_fingerprint()` / `tracker_config_for()` 与合并阶段共用；`_FramePipeline(convert=False)` 支持同帧多处消费；`open_observations_db()` + 批量插入/延迟索引/gzip level1 优化写路径 |
+| `Rules/src/ultra_rules/vlm/runner.py` | 阶段协调子进程：`worker.lock` 互斥、阶段串行/超时/取消、status 写入；cues+integrity 时走 `segment → detect → understanding` |
+| `Rules/src/ultra_rules/vlm/media.py` | 统一解码与时间基：`probe / decoded`（全帧软解）/ `sampled`（按 fps 采样）/ `SampleSchedule`（一次解码多消费者，取帧规则与 `sampled` 一致） |
+| `Rules/src/ultra_rules/vlm/combined.py` | `analyze_run` / `_track_and_detect` / `detect_run`：tracking + cues + integrity 单次解码；缓存命中重放；lazy 输出 cues/integrity artifacts |
 | `Rules/src/ultra_rules/vlm/integrity.py` | 完整性 CV 检测：抽样与基线比对 → 变化区间 |
 | `Rules/src/ultra_rules/vlm/storage.py` | JSON/JSONL 读写、指纹 `digest`、`progress.json`、缓存工具 |
 | `Rules/src/ultra_rules/pose_adapter.py` | YOLO-Pose 单帧推理适配（每文件独立 tracker；PT0-1 批量化改造点） |
 | `Rules/src/ultra_rules/vlm/poi.py` | 候选生成：PoiTracker 状态机 |
 | `Rules/src/ultra_rules/vlm/cues.py` | 红灯 CV 检测 + `calibrate()` 校准工具 |
 | `Rules/src/ultra_rules/vlm/decision.py` | 确定性判定（红灯 / 退回 / 轨迹连续性）；信号 episode 合并 `merge_cue_episodes`、目标选择 `select_cue_target`、退回 `retreat_event` |
-| `Rules/src/ultra_rules/vlm/sampling.py` | 抽帧窗口、选帧、标注预览图 |
+| `Rules/src/ultra_rules/vlm/sampling.py` | 抽帧窗口、选帧、sample manifest、`build_sample(render=...)`（lazy 只写 manifest）、`render_preview()`（按需生成 contact sheet） |
 | `Rules/src/ultra_rules/vlm/prompting.py` | VLM 提示词 |
 | `Rules/src/ultra_rules/vlm/qwen_worker.py` | Qwen 模型封装 + `understand()` 编排；信号触发路径 `_cue_pairs()` / `_process_cue_candidate()`（确定性，不默认调模型） |
 | `Rules/src/ultra_rules/vlm/results.py` | 解析 / 裁决（`decision_from_conditions` 合取真值表 + 证据校验降级）/ 聚合 |
-| `backend/app/vlm_api.py` | VLM HTTP 接口 + 任务调度器（`_pump`，`MAX_CONCURRENT=1` 单 worker 槽，队列落盘可重启恢复）；视频首帧 `GET /videos/{id}/thumbnail`；文件夹批量导入 `POST /videos/import-folder` |
+| `backend/app/vlm_api.py` | VLM HTTP 接口 + 任务调度器（`_pump`，`MAX_CONCURRENT=1` 单 worker 槽，队列落盘可重启恢复）；视频首帧 `GET /videos/{id}/thumbnail`；文件夹批量导入 `POST /videos/import-folder`；`/artifacts/previews/*.jpg` 缺失时按 manifest 懒生成并缓存 |
 | `backend/app/vlm_jobs.py` | 任务启动/状态/取消：`launch/status/cancel`、owner 进程存活判定、reap 线程 |
 | `backend/app/event_rules.py` | 规则库 CRUD + ManagedRun + resolve；规则类别迁移、强行通过通道配对校验、分析前区域/类别校验 |
 | `backend/app/library_api.py` / `video_api.py` | 记录管理（展示名/处理时长 `durationSec`）/ 视频预览（H.264 免转码重封装优先、其余 NVDEC+NVENC、SHA-256 缓存 + `ULTRA_VIDEO_PREVIEW_CACHE_BYTES` 上限、`ULTRA_VIDEO_MAX_CONCURRENT`、禁用 CPU 回退） |
@@ -720,18 +807,20 @@ python Rules/scripts/bench_tracking.py run --input <视频> --name clip --limit-
 - [ ] **采样 manifest 长度不一致**：个别窗口 `sampleTimesSeconds` 与 `sourceFrameIndices` 长度不等时 `frameIndex` 映射被跳过（前端 seek 用 `evidenceTimeSec` 不受影响）；待排查 `sampling.py` 或加防御性对齐。
 - [ ] **评测集缺失**：P2 前无法量化准确率，属于当前最高优先级的“基础设施”缺口。
 - [x] **监控 HEVC 兼容预览触发（本轮修复）**：黑屏 + `Missing JPEG payload` 根因与修复见 4.5；GPU 转码链路本轮实测跑通，预览按 SHA-256 缓存。
-- [ ] **长视频吞吐无基线**：链路 A 逐帧 seek 乒乓、链路 B 阶段串行 + batch=1，GPU 利用率低（定性诊断，见 3.4）；倍数/占空比/显存峰值全部待实测（6.4.1 基线表）。
+- [x] **长视频吞吐基线（部分）**：链路 B 已完成单次解码 + lazy 预览 + tracking I/O；30min 真实任务完整 `detect` 179.7s（P0 时 193.6s），5min 任务 understanding 0.41s（6.4.7）。191min 样本完整端到端、GPU 占空比/显存峰值仍待补测（6.4.1 基线表）。
+- [x] **性能 P0/P1/P2 + P3 I/O 已落地（2026-11-26）**：tracking+cues+integrity 单次解码、integrity 多区共享、lazy 证据预览、tracking I/O/缓存优化；observations/candidates/cues/integrity 逐项一致（6.4.7）。下一步 P3 模型/解码评测与 P4。
 - [ ] **单 GPU 显存争用**：4B BF16 此前峰值约 9GB（6.2④ 既有记录）+ 姿态模型 + 实时控制台同卡；PT2 并发前必须显存门禁与抢占策略。
 - [ ] **分片并行跟踪的边界风险**：轨迹断裂/ID 切换可能破坏候选可靠性红线（PT1-3），默认不做；跨分片去重（PT2-3）同。
 - [ ] **HEVC 兼容预览依赖 NVIDIA 硬解**：`video_api.transcode` 明确禁用 CPU 回退，无 NVDEC 的机器上长 HEVC 视频无法生成兼容预览（现有设计；PT0-2 硬解化同样受此约束）。
 - [x] **PT0 第一期落地（默认关）**：pipeline 比特一致；batch 强制 FP32 消除 ID 漂移；出厂配置 1.19×（本轮实测，见 4.6 / 6.4.5）；存量观测缓存因指纹 bump 一次性失效。**本机已按用户确认在 `backend/.env` 启用 batch8+pipeline**（机器本地配置，不入库）；代码默认仍为关，其他机器/生产默认开启仍待 P2 评测集回归。
 - [ ] **批量数值漂移教训**：TF32 批量前向的微差会被跟踪器放大为长视频 trackId 切换（本轮实测 3623/15000 帧）；后续任何批量化（understanding 等）必须先跑长视频一致性回归，必要时配确定性精度。
-- [ ] **本机 tracking 推理瓶颈**：PT0 空间有限（1.19×）；长视频主收益在 PT1-4 / PT1-1；GPU 利用率/显存峰值待实测。
+- [x] **tracking 推理瓶颈 + I/O 优化（部分）**：PT0 批处理/重叠空间有限（1.19×）；P3 I/O/缓存已把 tracking 100.8→89.3s（-11.4%）、detect 193.6→179.7s；TensorRT/NVDEC 与 GPU 利用率/显存峰值仍待实测。
 
 ---
 
 ## 9. 下一步建议（按顺序）
 
+0. **性能路线 P0/P1/P2 已完成，P3 I/O/缓存已完成**（`optimize.md`，非准确率 P0/P1/P2）：单次解码 `detect`、integrity 多区共享、lazy 预览、tracking I/O 优化；真实任务已逐项对齐。下一步 P3 剩余模型/解码评测（TensorRT/ONNX/FP16/NVDEC）或 P4（队列、ETA、worker 分离），不要重复做单次解码、lazy 预览或 tracking I/O。
 1. **P2 先行打地基**：先做最小标注集 + 指标脚本（哪怕只标 100 条），否则 P1 的每次调整都无法证明好坏。
 2. **P1 的“证据”优先于“换大模型”**：先做高分辨率 ROI 抽帧 + 结构化条件输出，再做 4B/8B 对比。
 3. **红灯阈值校准**：找一个含真实红灯亮起的片段，跑 `calibrate` 落地阈值。

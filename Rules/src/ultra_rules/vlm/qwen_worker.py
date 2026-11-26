@@ -6,6 +6,7 @@ from pathlib import Path
 from .contracts import RunRequest
 from .decision import (
     RETREAT_SECONDS,
+    build_target_index,
     candidate_groups,
     cue_state_in_window,
     evaluate,
@@ -97,6 +98,12 @@ def _is_entry(candidate, pois):
     return True
 
 
+def _needs_deterministic_evidence(deterministic):
+    """A closed signal gate is an audit-only no_match; no frames to review."""
+    return not (deterministic["decision"] == "no_match"
+                and deterministic["cueEvidence"].get("state") == "off")
+
+
 def _cue_veto(part, deterministic):
     if not deterministic:
         return
@@ -142,7 +149,8 @@ def _process_candidate(run_dir, config, request, candidate, events, state, group
         try:
             deterministic = evaluate(candidate, event, request, run_dir, grouped=grouped, timelines=timelines)
             if deterministic is not None and not deterministic["reviewRequired"] and not request.dryRun:
-                output["segments"] = _build_deterministic_evidence(run_dir, config, request, candidate, event, result_id, deterministic)
+                if _needs_deterministic_evidence(deterministic):
+                    output["segments"] = _build_deterministic_evidence(run_dir, config, request, candidate, event, result_id, deterministic)
                 output.update(deterministicDecision=deterministic["decision"],
                               cueEvidence=deterministic["cueEvidence"],
                               decision=deterministic["decision"], reason=deterministic["reason"],
@@ -157,7 +165,8 @@ def _process_candidate(run_dir, config, request, candidate, events, state, group
                 cue_evidence = deterministic["cueEvidence"] if deterministic else None
                 for index, (start, end) in enumerate(windows(candidate["triggerSec"], event, config["video"]["durationSec"])):
                     sample_id = f"{result_id}-{index}"
-                    frames, metadata, manifest = build_sample(run_dir, config, request, candidate, start, end, sample_id)
+                    frames, metadata, manifest = build_sample(run_dir, config, request, candidate, start, end, sample_id,
+                                                              render=True)
                     quality = manifest["quality"]
                     quality.update(preContextClipped=candidate["triggerSec"] - event.preSeconds < 0,
                                    postContextClipped=candidate["triggerSec"] + event.postSeconds > config["video"]["durationSec"])
@@ -428,7 +437,7 @@ def _cue_pairs(request: RunRequest, events: dict, timelines: dict):
 
 
 def _process_cue_candidate(run_dir, config, request, event, line, zone, cue, episode_index, interval,
-                           raw_trigger_count, candidates, grouped, state):
+                           raw_trigger_count, candidates, grouped, state, *, target_index=None):
     """One deterministic verdict per signal episode (no model call by default)."""
     result_id = f"cue-{cue.id}-{episode_index}-{event.id}"
     if result_id in state["completed"]:
@@ -439,7 +448,7 @@ def _process_cue_candidate(run_dir, config, request, event, line, zone, cue, epi
     end = min(duration, offset + event.postSeconds)
     if end <= start:
         end = min(duration, start + 1.0)
-    target = select_cue_target(candidates, line, zone, start, end, onset)
+    target = select_cue_target(candidates, line, zone, start, end, onset, index=target_index)
     primary = line if target is None or target.get("triggerKind") == "line.cross" else (zone or line)
     candidate = {
         "candidateId": f"cue-{event.id}-{cue.id}-{episode_index}",
@@ -484,11 +493,15 @@ def _process_cue_candidate(run_dir, config, request, event, line, zone, cue, epi
         "retreatSec": retreat_sec, "retreatKind": retreat_kind, "entrySec": entry_sec,
     }
     segments = []
-    try:
-        deterministic = {"decision": decision, "reason": reason}
-        segments = _build_deterministic_evidence(run_dir, config, request, candidate, event, result_id, deterministic)
-    except Exception:
-        quality_warnings.append("cue_evidence_missing")
+    # A signal-only episode with no subject is an audit row; decoding its
+    # window would only produce a preview of an empty channel. Keep the
+    # evidence budget for episodes that actually have someone to review.
+    if target is not None:
+        try:
+            deterministic = {"decision": decision, "reason": reason}
+            segments = _build_deterministic_evidence(run_dir, config, request, candidate, event, result_id, deterministic)
+        except Exception:
+            quality_warnings.append("cue_evidence_missing")
     output = {
         "schemaVersion": "1", "runId": run_dir.name, "videoId": request.videoId, **candidate,
         "eventDefinitionId": event.id, "description": event.description, "resultId": result_id,
@@ -539,6 +552,7 @@ def understand(run_dir: Path):
     state = {"model": None, "done": len(completed), "failed": 0,
              "counts": {"match": 0, "no_match": 0, "uncertain": 0}, "completed": completed, "currentSegment": 0}
     grouped = candidate_groups(candidates)
+    target_index = build_target_index(candidates)
     # Deterministic integrity warnings stream first: they need no model warm-up
     # and remain available even when the run has no tracking candidates at all.
     for zone, index, interval, event, timeline in integrity_pairs:
@@ -547,7 +561,7 @@ def understand(run_dir: Path):
     # episode, anchored on the paired counting line (or auxiliary zone).
     for event, line, zone, cue, episode_index, interval, raw_count in cue_pairs:
         _process_cue_candidate(run_dir, config, request, event, line, zone, cue, episode_index, interval,
-                               raw_count, candidates, grouped, state)
+                               raw_count, candidates, grouped, state, target_index=target_index)
     for segment in segments:
         bucket = [c for c in entry_candidates if segment["startSec"] <= c["triggerSec"] < segment["endSec"]]
         if not bucket:

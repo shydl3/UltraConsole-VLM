@@ -4,6 +4,7 @@ from pathlib import Path
 
 from ultra_rules.vlm.contracts import Poi, RunRequest
 from ultra_rules.vlm.decision import (
+    build_target_index,
     cue_state_in_window,
     evaluate,
     merge_cue_episodes,
@@ -153,6 +154,9 @@ def test_select_cue_target_prefers_the_entry_line_then_auxiliary_zone():
     zone_rows = [candidate("zone-entry", 10.1, kind="zone.enter", poi="zone")]
     assert select_cue_target(zone_rows, line, zone, 9.0, 12.0, 10.0)["candidateId"] == "zone-entry"
     assert select_cue_target([], line, zone, 9.0, 12.0, 10.0) is None
+    # The understanding loop builds the index once and reuses it for every episode.
+    index = build_target_index(rows)
+    assert select_cue_target(rows, line, zone, 9.0, 12.0, 10.0, index=index)["candidateId"] == "entry2"
 
 
 def test_retreat_event_handles_line_and_zone():

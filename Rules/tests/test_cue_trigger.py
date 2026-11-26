@@ -117,6 +117,28 @@ def test_cue_verdict_match_retreat_and_no_subject(tmp_path, monkeypatch):
     assert empty["trackSegmentId"] is None
 
 
+def test_no_subject_cue_episode_skips_evidence_decoding(tmp_path, monkeypatch):
+    request = make_request(pois=[line_poi()], cues=[cue_roi()])
+    event, line, cue = request.events[0], request.pois[0], request.cues[0]
+    config = {"video": {"durationSec": 40.0, "width": 1920, "height": 1080, "sha256": "abc",
+                        "sourcePath": str(tmp_path / "missing.mp4")}}
+    monkeypatch.setattr(worker, "_build_deterministic_evidence",
+                        lambda *args: (_ for _ in ()).throw(AssertionError("no-subject evidence")))
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    state = {"model": None, "done": 0, "failed": 0,
+             "counts": {"match": 0, "no_match": 0, "uncertain": 0},
+             "completed": set(), "currentSegment": 0}
+    worker._process_cue_candidate(run_dir, config, request, event, line, None, cue, 0, [10.0, 10.2], 1,
+                                  [], {}, state)
+    result = list(iter_jsonl(run_dir / "results.jsonl"))[0]
+    assert result["decision"] == "no_match"
+    assert "no_subject" in result["qualityWarnings"]
+    assert "cue_evidence_missing" not in result["qualityWarnings"]
+    assert result["segments"] == []
+    assert result["quality"] is None
+
+
 def test_cue_verdict_uses_the_auxiliary_zone_when_no_line_crossing(tmp_path, monkeypatch):
     request = make_request(pois=[line_poi(), zone_poi()], cues=[cue_roi()])
     event, line, zone, cue = request.events[0], request.pois[0], request.pois[1], request.cues[0]

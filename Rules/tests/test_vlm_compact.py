@@ -149,7 +149,7 @@ def test_worker_compact_flow_preserves_poi_seek_metadata(tmp_path, monkeypatch, 
                 raw = raw[:-2]
             return raw, {"generationTruncated": mode in ("truncated", "complete_without_eos")}
 
-    def build_sample(_dir, _config, _request, _candidate, start, end, _sample_id):
+    def build_sample(_dir, _config, _request, _candidate, start, end, _sample_id, render=True):
         return None, {}, {"window": {"startSec": start, "endSec": end}, "observations": [],
                           "sampleTimesSeconds": [], "sourceFrameIndices": [],
                           "quality": {"targetVisibleFraction": .3, "uniqueFrameCount": 17, "medianTargetHeightPx": 90}}
@@ -213,7 +213,7 @@ def _fake_model(monkeypatch, qwen_worker, calls):
                                "conditions": [{"index": 0, "value": "yes", "evidenceTimeSec": 31.0}]}), \
                 {"generationTruncated": False}
 
-    def build_sample(_dir, _config, _request, _candidate, start, end, _sample_id):
+    def build_sample(_dir, _config, _request, _candidate, start, end, _sample_id, render=True):
         return None, {}, {"window": {"startSec": start, "endSec": end}, "observations": [],
                           "sampleTimesSeconds": [], "sourceFrameIndices": [],
                           "quality": {"targetVisibleFraction": .3, "uniqueFrameCount": 17, "medianTargetHeightPx": 90}}
@@ -250,6 +250,21 @@ def test_worker_all_off_window_is_deterministic_no_match_without_model(tmp_path,
     assert result["decision"] == "no_match"
     assert result["inferenceStatus"] == "deterministic"
     assert result["cueEvidence"]["state"] == "off"
+
+
+def test_worker_all_off_candidate_skips_evidence_decoding(tmp_path, monkeypatch):
+    qwen_worker = _cue_run(tmp_path, [])
+    calls = []
+    _fake_model(monkeypatch, qwen_worker, calls)
+    monkeypatch.setattr(qwen_worker, "_build_deterministic_evidence",
+                        lambda *args: (_ for _ in ()).throw(AssertionError("closed-gate evidence")))
+    qwen_worker.understand(tmp_path)
+    result = list(iter_jsonl(tmp_path / "results.jsonl"))[0]
+    assert calls == []
+    assert result["decision"] == "no_match"
+    assert result["inferenceStatus"] == "deterministic"
+    assert result["cueEvidence"]["state"] == "off"
+    assert result["segments"] == []
 
 
 def test_worker_tracking_gap_is_advisory_match(tmp_path, monkeypatch):

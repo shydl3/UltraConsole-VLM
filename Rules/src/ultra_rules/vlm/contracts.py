@@ -174,6 +174,10 @@ class AnalysisParameters(StrictModel):
     maxFrames: int = Field(default=32, ge=4, le=64, multiple_of=2)
     maxPixels: int = Field(default=196608, ge=65536, le=786432)
     maxNewTokens: int = Field(default=1024, ge=128, le=2048)
+    # Deterministic evidence writes only the sample manifest in lazy mode; the
+    # API renders the contact sheet on first access. VLM/dry-run samples always
+    # render eagerly because they need the frames in memory.
+    previewMode: Literal["eager", "lazy"] = "lazy"
     dryRun: bool = False
 
 

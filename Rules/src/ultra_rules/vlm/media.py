@@ -51,3 +51,23 @@ def sampled(path: Path, meta: dict, fps: float):
             continue
         yield index, timestamp, source, frame
         target = (math.floor(timestamp * fps + 1e-6) + 1) / fps
+
+
+class SampleSchedule:
+    """Re-use one decoded stream at a per-consumer sample rate.
+
+    The acceptance rule is identical to ``sampled()`` so a shared decode pass
+    selects exactly the frames each consumer would have decoded on its own.
+    """
+
+    __slots__ = ("fps", "target")
+
+    def __init__(self, fps: float):
+        self.fps = float(fps)
+        self.target = 0.0
+
+    def accept(self, timestamp: float) -> bool:
+        if timestamp + 1e-6 < self.target:
+            return False
+        self.target = (math.floor(timestamp * self.fps + 1e-6) + 1) / self.fps
+        return True

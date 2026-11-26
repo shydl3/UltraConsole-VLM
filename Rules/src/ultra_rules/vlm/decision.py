@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from bisect import bisect_left, bisect_right
 from collections import defaultdict
 from pathlib import Path
 
@@ -127,25 +128,55 @@ def merge_cue_episodes(intervals: list[list[float]], dedupe_seconds: float):
     return episodes
 
 
-def select_cue_target(candidates: list[dict], line, zone, start: float, end: float, trigger: float):
+TARGET_TRIGGERS = ("line.cross", "zone.enter", "initial_inside")
+
+
+def build_target_index(candidates: list[dict]):
+    """Index subject candidates by POI/kind with time-sorted lookup lists.
+
+    Signal episodes are judged one by one; scanning every crossing in the run
+    for each episode would make a dense signal quadratic on long recordings.
+    """
+    grouped: dict[tuple, list[dict]] = defaultdict(list)
+    for candidate in candidates:
+        kind = candidate.get("triggerKind")
+        if kind in TARGET_TRIGGERS:
+            grouped[(candidate.get("poiId"), kind)].append(candidate)
+    index = {}
+    for key, rows in grouped.items():
+        rows.sort(key=lambda candidate: candidate["triggerSec"])
+        index[key] = ([candidate["triggerSec"] for candidate in rows], rows)
+    return index
+
+
+def _targets_in_window(index: dict, poi_id: str, kinds: tuple[str, ...], start: float, end: float):
+    rows: list[dict] = []
+    for kind in kinds:
+        entry = index.get((poi_id, kind))
+        if entry is None:
+            continue
+        times, values = entry
+        rows.extend(values[bisect_left(times, start):bisect_right(times, end)])
+    return rows
+
+
+def select_cue_target(candidates: list[dict], line, zone, start: float, end: float, trigger: float, *,
+                      index: dict | None = None):
     """Pick the person nearest the signal trigger for one channel.
 
     Prefer a crossing on the paired counting line in the entry direction; fall
     back to entering the optional auxiliary counting zone when no line crossing
     is present (e.g. tracking started while the person was already inside).
     """
-    def inside(candidate):
-        return start <= candidate["triggerSec"] <= end
-
-    pool = [c for c in candidates
-            if c.get("poiId") == line.id and c.get("triggerKind") == "line.cross" and inside(c)
-            and (not line.entryDirection or c.get("direction") == line.entryDirection)]
+    index = build_target_index(candidates) if index is None else index
+    pool = _targets_in_window(index, line.id, ("line.cross",), start, end)
+    if line.entryDirection:
+        pool = [candidate for candidate in pool if candidate.get("direction") == line.entryDirection]
     if not pool and zone is not None:
-        pool = [c for c in candidates
-                if c.get("poiId") == zone.id and c.get("triggerKind") in ("zone.enter", "initial_inside") and inside(c)]
+        pool = _targets_in_window(index, zone.id, ("zone.enter", "initial_inside"), start, end)
     if not pool:
         return None
-    return min(pool, key=lambda c: (abs(c["triggerSec"] - trigger), c["triggerSec"]))
+    return min(pool, key=lambda candidate: (abs(candidate["triggerSec"] - trigger), candidate["triggerSec"]))
 
 
 def tracked_through(run_dir: Path, candidate: dict, start: float, end: float, max_gap: float) -> bool:

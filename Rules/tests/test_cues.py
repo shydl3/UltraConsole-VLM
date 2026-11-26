@@ -4,7 +4,15 @@ from pathlib import Path
 import av
 import numpy as np
 from ultra_rules.vlm.contracts import CueDefinition, RunRequest
-from ultra_rules.vlm.cues import _hysteresis, _red_ratio, _roi_mask, calibrate, detect_run, detect_timeline
+from ultra_rules.vlm.cues import (
+    _hysteresis,
+    _red_ratio,
+    _roi_mask,
+    calibrate,
+    detect_all,
+    detect_run,
+    detect_timeline,
+)
 from ultra_rules.vlm.storage import read_json
 
 
@@ -57,6 +65,29 @@ def test_detect_timeline_red_interval(tmp_path):
     onset, offset = result["intervals"][0]
     assert 0.4 <= onset <= 0.6
     assert 1.3 <= offset <= 1.5
+
+
+def test_detect_all_uses_one_decode_pass_per_sample_rate(tmp_path, monkeypatch):
+    import ultra_rules.vlm.cues as cues_module
+
+    src = tmp_path / "v.mp4"
+    _make_video(src, red_frames=set(range(5, 15)))
+    meta = {"width": 64, "height": 64, "fps": 10, "durationSec": 2.0,
+            "timeOriginSec": 0.0, "timeBase": "1/10", "sha256": "x"}
+    first = cue()
+    second = CueDefinition(id="red2", points=[[0.1, 0.1], [0.9, 0.1], [0.9, 0.9], [0.1, 0.9]])
+    expected = {item.id: detect_timeline(src, meta, item) for item in (first, second)}
+
+    calls = []
+    original = cues_module.sampled
+
+    def counted(*args, **kwargs):
+        calls.append(args[2])
+        yield from original(*args, **kwargs)
+
+    monkeypatch.setattr(cues_module, "sampled", counted)
+    assert detect_all(src, meta, [first, second]) == expected
+    assert calls == [10.0]
 
 
 def test_calibrate_reports_ratio_stats_and_suggestion(tmp_path):

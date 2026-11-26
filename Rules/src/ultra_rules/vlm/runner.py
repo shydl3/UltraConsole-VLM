@@ -58,11 +58,35 @@ def phase_timeout(phase: str, config: dict, run_dir: Path) -> float:
         return max(3600.0, duration)
     if phase == "tracking":
         return max(86400.0, duration * 4)
-    if phase == "cues":
+    if phase in ("cues", "integrity"):
         return max(86400.0, duration)
-    if phase == "integrity":
-        return max(86400.0, duration)
+    if phase == "detect":
+        # The combined phase includes tracking, cues and integrity; use the
+        # tracking budget as the safe upper bound.
+        return max(86400.0, duration * 4)
     return max(86400.0, duration * 4, count_candidates(run_dir) * 30 + 3600)
+
+
+def phases_for(config: dict) -> list[tuple[str, str]]:
+    """Ordered phases for one run.
+
+    When both cues and integrity exist, ``detect`` owns tracking as well and
+    decodes the source once. Otherwise tracking remains its own phase and only
+    the matching CV phase follows it.
+    """
+    phases = [("segment", config["posePython"])]
+    has_cues = bool(config["request"].get("cues"))
+    has_integrity = bool(config["request"].get("integrityZones"))
+    if has_cues and has_integrity:
+        phases.append(("detect", config["posePython"]))
+    else:
+        phases.append(("tracking", config["posePython"]))
+        if has_cues:
+            phases.append(("cues", config["posePython"]))
+        elif has_integrity:
+            phases.append(("integrity", config["posePython"]))
+    phases.append(("understanding", config["qwenPython"]))
+    return phases
 
 
 def run(run_dir: Path):
@@ -94,14 +118,7 @@ def run(run_dir: Path):
             # segment runs in the pose env (only needs av); tracking/cues stay on
             # the full timeline; understanding loops segments inside one worker
             # so the Qwen model is loaded once but processed in bounded slices.
-            phases = [("segment", config["posePython"]), ("tracking", config["posePython"])]
-            if config["request"].get("cues"):
-                phases.append(("cues", config["posePython"]))
-            # Integrity detection reuses the tracking observations for occlusion
-            # masking, so it must run after tracking and before understanding.
-            if config["request"].get("integrityZones"):
-                phases.append(("integrity", config["posePython"]))
-            phases.append(("understanding", config["qwenPython"]))
+            phases = phases_for(config)
             for phase, python in phases:
                 if cancelled or (run_dir / "cancel.requested").exists():
                     cancelled = True

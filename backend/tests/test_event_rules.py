@@ -302,7 +302,7 @@ def test_parameter_defaults_and_custom_values_reach_worker_snapshot(client, monk
     (folder / 'source.mp4').write_bytes(b'test')
     settings = {'modelPath': contract['models'][1]['path'], 'poseDevice': 'cpu', 'poseFps': 15, 'conf': .4, 'iou': .6, 'stableSeconds': .4,
                 'hysteresisPx': 10, 'maxGapSeconds': 2, 'sampleFps': 4, 'maxFrames': 48,
-                'maxPixels': 393216, 'maxNewTokens': 256, 'dryRun': False}
+                'maxPixels': 393216, 'maxNewTokens': 256, 'previewMode': 'lazy', 'dryRun': False}
 
     def launch(run_dir, _python):
         # Check the exact persisted request consumed by the real worker.

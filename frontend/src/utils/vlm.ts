@@ -53,7 +53,7 @@ export type VlmResult = {
   segments?: { previewPath?: string; reason?: string; videoDescription?: string | null; decision?: string; conditions?: VlmCondition[]; rawOutputPath?: string; sampleManifest?: string; window: { startSec: number; endSec: number } }[]
 }
 
-export const activeVlm = (state: string) => ['queued', 'tracking', 'cues', 'integrity', 'understanding', 'cancelling'].includes(state)
+export const activeVlm = (state: string) => ['queued', 'tracking', 'cues', 'integrity', 'detect', 'understanding', 'cancelling'].includes(state)
 
 const clamp = (value: number, min: number, max: number) => Math.min(max, Math.max(min, value))
 
@@ -73,6 +73,12 @@ export function vlmProgress(run: Pick<VlmRun, 'state'> & { progress?: VlmProgres
     case 'tracking': return { percent: Math.round(tracking), stage: 'tracking' }
     case 'cues': return { percent: 46, stage: 'cues' }
     case 'integrity': return { percent: Math.round(50 + 4 * clamp(p.integrityFraction ?? 0, 0, 1)), stage: 'integrity' }
+    case 'detect': {
+      if (p.integrityFraction !== undefined) {
+        return { percent: Math.round(44 + 4 * clamp(p.integrityFraction, 0, 1)), stage: 'detect' }
+      }
+      return { percent: Math.round(tracking), stage: 'detect' }
+    }
     case 'understanding': return { percent: Math.round(judgments), stage: 'understanding' }
     case 'completed':
     case 'partial': return { percent: 100, stage: 'understanding' }

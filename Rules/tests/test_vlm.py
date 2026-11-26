@@ -8,7 +8,7 @@ import numpy as np
 import pytest
 from pydantic import ValidationError
 from ultra_rules.vlm.contracts import ConditionCheck, EventDefinition, RunRequest
-from ultra_rules.vlm.media import decoded, probe, sampled
+from ultra_rules.vlm.media import SampleSchedule, decoded, probe, sampled
 from ultra_rules.vlm.poi import PoiTracker
 from ultra_rules.vlm.results import apply_answer, decision_from_conditions, parse_answer, verified_decision
 from ultra_rules.vlm.sampling import choose_rows, source_images, windows
@@ -106,6 +106,70 @@ def test_timestamps_sampling_and_exact_frame_retrieval(tmp_path, fps, vfr):
     images = source_images(path, meta, selected)
     for r in selected:
         assert np.array_equal(np.array(images[r["frameIndex"]]), all_frames[r["frameIndex"]][3].to_ndarray(format="rgb24"))
+
+
+def test_sample_schedule_matches_sampled_on_vfr(tmp_path):
+    path = tmp_path / "clip.mp4"
+    make_video(path, 25, vfr=True)
+    meta = probe(path)
+    for fps in (2, 5, 7, 10):
+        expected = [(index, t) for index, t, _source, _frame in sampled(path, meta, fps)]
+        schedule = SampleSchedule(fps)
+        actual = [(index, t) for index, t, _source, _frame in decoded(path, meta) if schedule.accept(t)]
+        assert actual == expected
+
+
+def test_source_images_retries_a_seek_that_lands_after_the_first_frame(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from PIL import Image
+    from ultra_rules.vlm import sampling
+
+    class FakeFrame:
+        def __init__(self, t, value):
+            self.time = t
+            self.value = value
+
+        def to_image(self):
+            return Image.new("RGB", (1, 1), (self.value, 0, 0))
+
+    class Stream:
+        time_base = 1 / 1000
+
+    class Container:
+        def __init__(self):
+            self.seek_seconds = []
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        @property
+        def streams(self):
+            return SimpleNamespace(video=[Stream()])
+
+        def seek(self, target, stream=None, backward=True):
+            self.seek_seconds.append(target * float(Stream.time_base))
+
+        def decode(self, stream):
+            # The narrow seek lands after frame 10.0; the wider retry includes it.
+            if len(self.seek_seconds) == 1:
+                yield from (FakeFrame(11.0, 2), FakeFrame(12.0, 3))
+            else:
+                yield from (FakeFrame(10.0, 1), FakeFrame(11.0, 2), FakeFrame(12.0, 3))
+
+    container = Container()
+    monkeypatch.setattr(sampling.av, "open", lambda _path: container)
+    monkeypatch.setattr(sampling, "decoded", lambda *args: (_ for _ in ()).throw(AssertionError("full decode")))
+    rows = [{"frameIndex": i, "sourcePtsSec": t} for i, t in enumerate((10.0, 11.0, 12.0))]
+
+    images = source_images(tmp_path / "x.mp4", {"timeOriginSec": 0.0}, rows)
+
+    assert container.seek_seconds == [7.5, 2.0]  # 2.5s backoff, then 8s
+    assert sorted(images) == [0, 1, 2]
+    assert images[0].getpixel((0, 0)) == (1, 0, 0)
 
 
 def test_window_split_and_clipping():
